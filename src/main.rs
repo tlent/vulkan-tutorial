@@ -1,8 +1,9 @@
 use std::ffi::{c_void, CStr, CString};
 
 use ash::extensions::ext::DebugUtils;
-use ash::version::{EntryV1_0, InstanceV1_0};
-use ash::{vk, Entry, Instance};
+use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
+use ash::{vk, Device, Entry, Instance};
+use lazy_static::lazy_static;
 use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -17,6 +18,11 @@ const WINDOW_HEIGHT: u32 = 600;
 const VALIDATION_ENABLED: bool = true;
 #[cfg(not(debug_assertions))]
 const VALIDATION_ENABLED: bool = false;
+
+lazy_static! {
+    static ref VALIDATION_LAYERS: Vec<&'static CStr> =
+        vec![CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap()];
+}
 
 fn main() {
     let (window, event_loop) = init_window();
@@ -50,6 +56,8 @@ struct HelloTriangleApp {
     instance: Instance,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     physical_device: vk::PhysicalDevice,
+    device: Device,
+    graphics_queue: vk::Queue,
 }
 
 impl HelloTriangleApp {
@@ -62,11 +70,14 @@ impl HelloTriangleApp {
             None
         };
         let physical_device = Self::select_physical_device(&instance);
+        let (device, graphics_queue) = Self::create_logical_device(&instance, physical_device);
         Self {
             entry,
             instance,
             debug_messenger,
             physical_device,
+            device,
+            graphics_queue,
         }
     }
 
@@ -91,31 +102,31 @@ impl HelloTriangleApp {
             );
         }
         let extension_refs: Vec<_> = required_extensions.iter().map(|e| e.as_ptr()).collect();
-        let mut create_info = vk::InstanceCreateInfo {
+        let mut instance_create_info = vk::InstanceCreateInfo {
             p_application_info: &app_info,
             enabled_extension_count: extension_refs.len() as u32,
             pp_enabled_extension_names: extension_refs.as_ptr(),
             ..Default::default()
         };
-        let validation_layers =
-            vec![CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap()];
-        let layer_refs: Vec<_> = validation_layers.iter().map(|l| l.as_ptr()).collect();
-        let debug_messenger_create_info = debug_messenger_create_info();
+        let layer_refs: Vec<_>;
+        let debug_messenger_create_info;
         if VALIDATION_ENABLED {
-            if let Err(layer_name) = Self::check_validation_layer_support(entry, &validation_layers)
+            if let Err(layer_name) = Self::check_validation_layer_support(entry, &VALIDATION_LAYERS)
             {
                 panic!(
                     "Validation layer {} is not supported.",
                     layer_name.to_string_lossy()
                 );
             }
-            create_info.enabled_layer_count = layer_refs.len() as u32;
-            create_info.pp_enabled_layer_names = layer_refs.as_ptr();
-            create_info.p_next = &debug_messenger_create_info
+            layer_refs = VALIDATION_LAYERS.iter().map(|l| l.as_ptr()).collect();
+            debug_messenger_create_info = get_debug_messenger_create_info();
+            instance_create_info.enabled_layer_count = layer_refs.len() as u32;
+            instance_create_info.pp_enabled_layer_names = layer_refs.as_ptr();
+            instance_create_info.p_next = &debug_messenger_create_info
                 as *const vk::DebugUtilsMessengerCreateInfoEXT
                 as *const c_void;
         }
-        let instance = unsafe { entry.create_instance(&create_info, None).unwrap() };
+        let instance = unsafe { entry.create_instance(&instance_create_info, None).unwrap() };
         instance
     }
 
@@ -154,7 +165,7 @@ impl HelloTriangleApp {
     }
 
     fn setup_debug_messenger(entry: &Entry, instance: &Instance) -> vk::DebugUtilsMessengerEXT {
-        let create_info = debug_messenger_create_info();
+        let create_info = get_debug_messenger_create_info();
         let debug_utils = DebugUtils::new(entry, instance);
         unsafe {
             debug_utils
@@ -189,6 +200,41 @@ impl HelloTriangleApp {
         indices
     }
 
+    fn create_logical_device(
+        instance: &Instance,
+        physical_device: vk::PhysicalDevice,
+    ) -> (Device, vk::Queue) {
+        let indices = Self::find_queue_familes(instance, physical_device);
+        let graphics_family_index = indices.graphics_family.unwrap();
+        let queue_priority = 1.0;
+        let queue_create_info = vk::DeviceQueueCreateInfo {
+            queue_family_index: graphics_family_index,
+            queue_count: 1,
+            p_queue_priorities: &queue_priority,
+            ..Default::default()
+        };
+        let device_features = vk::PhysicalDeviceFeatures::default();
+        let mut device_create_info = vk::DeviceCreateInfo {
+            queue_create_info_count: 1,
+            p_queue_create_infos: &queue_create_info,
+            p_enabled_features: &device_features,
+            ..Default::default()
+        };
+        let layer_refs: Vec<_>;
+        if VALIDATION_ENABLED {
+            layer_refs = VALIDATION_LAYERS.iter().map(|l| l.as_ptr()).collect();
+            device_create_info.enabled_layer_count = layer_refs.len() as u32;
+            device_create_info.pp_enabled_layer_names = layer_refs.as_ptr();
+        }
+        let device = unsafe {
+            instance
+                .create_device(physical_device, &device_create_info, None)
+                .expect("Failed to create logical device")
+        };
+        let graphics_queue = unsafe { device.get_device_queue(graphics_family_index, 0) };
+        (device, graphics_queue)
+    }
+
     pub fn run(&self) {}
 }
 
@@ -199,6 +245,7 @@ impl Drop for HelloTriangleApp {
                 let debug_utils = DebugUtils::new(&self.entry, &self.instance);
                 debug_utils.destroy_debug_utils_messenger(m, None);
             }
+            self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
     }
@@ -215,7 +262,7 @@ impl QueueFamilyIndices {
     }
 }
 
-fn debug_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
+fn get_debug_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
     vk::DebugUtilsMessengerCreateInfoEXT {
         message_severity: vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE
             | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
