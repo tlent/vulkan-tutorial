@@ -49,19 +49,11 @@ struct HelloTriangleApp {
     entry: Entry,
     instance: Instance,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    physical_device: vk::PhysicalDevice,
 }
 
 impl HelloTriangleApp {
     pub fn new(window: &Window) -> Self {
-        let (entry, instance, debug_messenger) = Self::init_vulkan(window);
-        Self {
-            entry,
-            instance,
-            debug_messenger,
-        }
-    }
-
-    fn init_vulkan(window: &Window) -> (Entry, Instance, Option<vk::DebugUtilsMessengerEXT>) {
         let entry = Entry::new().unwrap();
         let instance = Self::create_instance(&entry, window);
         let debug_messenger = if VALIDATION_ENABLED {
@@ -69,7 +61,13 @@ impl HelloTriangleApp {
         } else {
             None
         };
-        (entry, instance, debug_messenger)
+        let physical_device = Self::select_physical_device(&instance);
+        Self {
+            entry,
+            instance,
+            debug_messenger,
+            physical_device,
+        }
     }
 
     fn create_instance(entry: &Entry, window: &Window) -> Instance {
@@ -165,6 +163,32 @@ impl HelloTriangleApp {
         }
     }
 
+    fn select_physical_device(instance: &Instance) -> vk::PhysicalDevice {
+        let devices = unsafe { instance.enumerate_physical_devices().unwrap() };
+        devices
+            .into_iter()
+            .find(|&d| Self::is_device_suitable(instance, d))
+            .expect("Failed to find a suitable GPU")
+    }
+
+    fn is_device_suitable(instance: &Instance, device: vk::PhysicalDevice) -> bool {
+        Self::find_queue_familes(instance, device).is_complete()
+    }
+
+    fn find_queue_familes(instance: &Instance, device: vk::PhysicalDevice) -> QueueFamilyIndices {
+        let mut indices = QueueFamilyIndices::default();
+        let families = unsafe { instance.get_physical_device_queue_family_properties(device) };
+        for (i, family) in families.iter().enumerate() {
+            if family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                indices.graphics_family = Some(i as u32);
+            }
+            if indices.is_complete() {
+                break;
+            }
+        }
+        indices
+    }
+
     pub fn run(&self) {}
 }
 
@@ -177,6 +201,17 @@ impl Drop for HelloTriangleApp {
             }
             self.instance.destroy_instance(None);
         }
+    }
+}
+
+#[derive(Default)]
+struct QueueFamilyIndices {
+    graphics_family: Option<u32>,
+}
+
+impl QueueFamilyIndices {
+    fn is_complete(&self) -> bool {
+        self.graphics_family.is_some()
     }
 }
 
