@@ -22,6 +22,9 @@ const VALIDATION_ENABLED: bool = true;
 #[cfg(not(debug_assertions))]
 const VALIDATION_ENABLED: bool = false;
 
+const VERT_SHADER_BYTES: &[u8] = include_bytes!("shaders/vert.spv");
+const FRAG_SHADER_BYTES: &[u8] = include_bytes!("shaders/frag.spv");
+
 lazy_static! {
     static ref VALIDATION_LAYERS: Vec<&'static CStr> =
         vec![CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap()];
@@ -70,6 +73,8 @@ struct HelloTriangleApp {
     swapchain_images: Vec<vk::Image>,
     swapchain_image_format: vk::Format,
     swapchain_extent: vk::Extent2D,
+    swapchain_imageviews: Vec<vk::ImageView>,
+    pipeline_layout: vk::PipelineLayout,
 }
 
 impl HelloTriangleApp {
@@ -97,6 +102,9 @@ impl HelloTriangleApp {
                 physical_device,
                 queue_family_indices,
             );
+        let swapchain_imageviews =
+            Self::create_imageviews(&device, &swapchain_images, swapchain_image_format);
+        let pipeline_layout = Self::create_graphics_pipeline(&device, swapchain_extent);
         Self {
             entry,
             instance,
@@ -112,6 +120,8 @@ impl HelloTriangleApp {
             swapchain_images,
             swapchain_image_format,
             swapchain_extent,
+            swapchain_imageviews,
+            pipeline_layout,
         }
     }
 
@@ -457,12 +467,141 @@ impl HelloTriangleApp {
         (swapchain, images, surface_format.format, extent)
     }
 
+    fn create_imageviews(
+        device: &Device,
+        images: &[vk::Image],
+        format: vk::Format,
+    ) -> Vec<vk::ImageView> {
+        images
+            .iter()
+            .map(|&image| {
+                let mut create_info = vk::ImageViewCreateInfo {
+                    image,
+                    view_type: vk::ImageViewType::TYPE_2D,
+                    format,
+                    ..Default::default()
+                };
+                let subresource_range = &mut create_info.subresource_range;
+                subresource_range.aspect_mask = vk::ImageAspectFlags::COLOR;
+                subresource_range.base_mip_level = 0;
+                subresource_range.level_count = 1;
+                subresource_range.base_array_layer = 0;
+                subresource_range.layer_count = 1;
+                unsafe { device.create_image_view(&create_info, None).unwrap() }
+            })
+            .collect()
+    }
+
+    fn create_graphics_pipeline(
+        device: &Device,
+        swapchain_extent: vk::Extent2D,
+    ) -> vk::PipelineLayout {
+        let vert_shader_module = Self::create_shader_module(device, VERT_SHADER_BYTES);
+        let frag_shader_module = Self::create_shader_module(device, FRAG_SHADER_BYTES);
+
+        let entry_point = CString::new("main").unwrap();
+        let vert_shader_stage_info = vk::PipelineShaderStageCreateInfo {
+            stage: vk::ShaderStageFlags::VERTEX,
+            module: vert_shader_module,
+            p_name: entry_point.as_ptr(),
+            ..Default::default()
+        };
+        let frag_shader_stage_info = vk::PipelineShaderStageCreateInfo {
+            stage: vk::ShaderStageFlags::FRAGMENT,
+            module: frag_shader_module,
+            p_name: entry_point.as_ptr(),
+            ..Default::default()
+        };
+        let shader_stages = [vert_shader_stage_info, frag_shader_stage_info];
+
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            primitive_restart_enable: vk::FALSE,
+            ..Default::default()
+        };
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: swapchain_extent.width as f32,
+            height: swapchain_extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: swapchain_extent,
+        };
+        let viewport_state = vk::PipelineViewportStateCreateInfo {
+            viewport_count: 1,
+            p_viewports: &viewport,
+            scissor_count: 1,
+            p_scissors: &scissor,
+            ..Default::default()
+        };
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo {
+            depth_clamp_enable: vk::FALSE,
+            rasterizer_discard_enable: vk::FALSE,
+            polygon_mode: vk::PolygonMode::FILL,
+            cull_mode: vk::CullModeFlags::BACK,
+            front_face: vk::FrontFace::CLOCKWISE,
+            depth_bias_enable: vk::FALSE,
+            line_width: 1.0,
+            ..Default::default()
+        };
+        let multisampling = vk::PipelineMultisampleStateCreateInfo {
+            sample_shading_enable: vk::FALSE,
+            rasterization_samples: vk::SampleCountFlags::TYPE_1,
+            ..Default::default()
+        };
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState {
+            color_write_mask: vk::ColorComponentFlags::all(),
+            blend_enable: vk::FALSE,
+            ..Default::default()
+        };
+        let color_blending = vk::PipelineColorBlendStateCreateInfo {
+            logic_op_enable: vk::FALSE,
+            attachment_count: 1,
+            p_attachments: &color_blend_attachment,
+            ..Default::default()
+        };
+
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default();
+
+        let pipeline_layout = unsafe {
+            device
+                .create_pipeline_layout(&pipeline_layout_create_info, None)
+                .unwrap()
+        };
+
+        unsafe {
+            device.destroy_shader_module(vert_shader_module, None);
+            device.destroy_shader_module(frag_shader_module, None);
+        }
+
+        pipeline_layout
+    }
+
+    fn create_shader_module(device: &Device, data: &[u8]) -> vk::ShaderModule {
+        let create_info = vk::ShaderModuleCreateInfo {
+            code_size: data.len(),
+            p_code: data.as_ptr() as *const u32,
+            ..Default::default()
+        };
+        unsafe { device.create_shader_module(&create_info, None).unwrap() }
+    }
+
     pub fn run(&self) {}
 }
 
 impl Drop for HelloTriangleApp {
     fn drop(&mut self) {
         unsafe {
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            for &v in &self.swapchain_imageviews {
+                self.device.destroy_image_view(v, None);
+            }
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
             self.device.destroy_device(None);
