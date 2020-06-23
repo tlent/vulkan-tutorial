@@ -76,6 +76,7 @@ struct HelloTriangleApp {
     swapchain_imageviews: Vec<vk::ImageView>,
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
+    graphics_pipeline: vk::Pipeline,
 }
 
 impl HelloTriangleApp {
@@ -106,7 +107,8 @@ impl HelloTriangleApp {
         let swapchain_imageviews =
             Self::create_imageviews(&device, &swapchain_images, swapchain_image_format);
         let render_pass = Self::create_render_pass(&device, swapchain_image_format);
-        let pipeline_layout = Self::create_graphics_pipeline(&device, swapchain_extent);
+        let (graphics_pipeline, pipeline_layout) =
+            Self::create_graphics_pipeline(&device, render_pass, swapchain_extent);
         Self {
             entry,
             instance,
@@ -125,6 +127,7 @@ impl HelloTriangleApp {
             swapchain_imageviews,
             render_pass,
             pipeline_layout,
+            graphics_pipeline,
         }
     }
 
@@ -532,8 +535,9 @@ impl HelloTriangleApp {
 
     fn create_graphics_pipeline(
         device: &Device,
+        render_pass: vk::RenderPass,
         swapchain_extent: vk::Extent2D,
-    ) -> vk::PipelineLayout {
+    ) -> (vk::Pipeline, vk::PipelineLayout) {
         let vert_shader_module = Self::create_shader_module(device, VERT_SHADER_BYTES);
         let frag_shader_module = Self::create_shader_module(device, FRAG_SHADER_BYTES);
 
@@ -612,12 +616,31 @@ impl HelloTriangleApp {
                 .unwrap()
         };
 
+        let pipeline_create_info = vk::GraphicsPipelineCreateInfo {
+            stage_count: 2,
+            p_stages: shader_stages.as_ptr(),
+            p_vertex_input_state: &vertex_input_info,
+            p_input_assembly_state: &input_assembly,
+            p_viewport_state: &viewport_state,
+            p_rasterization_state: &rasterizer,
+            p_multisample_state: &multisampling,
+            p_color_blend_state: &color_blending,
+            layout: pipeline_layout,
+            render_pass: render_pass,
+            subpass: 0,
+            ..Default::default()
+        };
+
+        let pipelines;
         unsafe {
+            pipelines = device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_create_info], None)
+                .unwrap();
             device.destroy_shader_module(vert_shader_module, None);
             device.destroy_shader_module(frag_shader_module, None);
         }
 
-        pipeline_layout
+        (pipelines[0], pipeline_layout)
     }
 
     fn create_shader_module(device: &Device, data: &[u8]) -> vk::ShaderModule {
@@ -635,6 +658,7 @@ impl HelloTriangleApp {
 impl Drop for HelloTriangleApp {
     fn drop(&mut self) {
         unsafe {
+            self.device.destroy_pipeline(self.graphics_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);
