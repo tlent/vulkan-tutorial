@@ -1,6 +1,7 @@
 use std::ffi::{c_void, CStr, CString};
 
 use ash::extensions::ext::DebugUtils;
+use ash::extensions::khr::Surface;
 use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 use ash::{vk, Device, Entry, Instance};
 use lazy_static::lazy_static;
@@ -55,9 +56,12 @@ struct HelloTriangleApp {
     entry: Entry,
     instance: Instance,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    surface: vk::SurfaceKHR,
+    surface_loader: Surface,
     physical_device: vk::PhysicalDevice,
     device: Device,
     graphics_queue: vk::Queue,
+    present_queue: vk::Queue,
 }
 
 impl HelloTriangleApp {
@@ -69,15 +73,24 @@ impl HelloTriangleApp {
         } else {
             None
         };
-        let physical_device = Self::select_physical_device(&instance);
-        let (device, graphics_queue) = Self::create_logical_device(&instance, physical_device);
+        let surface =
+            unsafe { ash_window::create_surface(&entry, &instance, window, None).unwrap() };
+        let surface_loader = Surface::new(&entry, &instance);
+        let physical_device = Self::select_physical_device(&instance, &surface_loader, surface);
+        let queue_indices =
+            Self::find_queue_familes(&instance, &surface_loader, surface, physical_device);
+        let (device, graphics_queue, present_queue) =
+            Self::create_logical_device(&instance, physical_device, queue_indices);
         Self {
             entry,
             instance,
             debug_messenger,
+            surface,
+            surface_loader,
             physical_device,
             device,
             graphics_queue,
+            present_queue,
         }
     }
 
@@ -174,24 +187,47 @@ impl HelloTriangleApp {
         }
     }
 
-    fn select_physical_device(instance: &Instance) -> vk::PhysicalDevice {
+    fn select_physical_device(
+        instance: &Instance,
+        surface_loader: &Surface,
+        surface: vk::SurfaceKHR,
+    ) -> vk::PhysicalDevice {
         let devices = unsafe { instance.enumerate_physical_devices().unwrap() };
         devices
             .into_iter()
-            .find(|&d| Self::is_device_suitable(instance, d))
+            .find(|&d| Self::is_device_suitable(instance, surface_loader, surface, d))
             .expect("Failed to find a suitable GPU")
     }
 
-    fn is_device_suitable(instance: &Instance, device: vk::PhysicalDevice) -> bool {
-        Self::find_queue_familes(instance, device).is_complete()
+    fn is_device_suitable(
+        instance: &Instance,
+        surface_loader: &Surface,
+        surface: vk::SurfaceKHR,
+        device: vk::PhysicalDevice,
+    ) -> bool {
+        Self::find_queue_familes(instance, surface_loader, surface, device).is_complete()
     }
 
-    fn find_queue_familes(instance: &Instance, device: vk::PhysicalDevice) -> QueueFamilyIndices {
+    fn find_queue_familes(
+        instance: &Instance,
+        surface_loader: &Surface,
+        surface: vk::SurfaceKHR,
+        device: vk::PhysicalDevice,
+    ) -> QueueFamilyIndices {
         let mut indices = QueueFamilyIndices::default();
         let families = unsafe { instance.get_physical_device_queue_family_properties(device) };
         for (i, family) in families.iter().enumerate() {
+            let index = i as u32;
             if family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
-                indices.graphics_family = Some(i as u32);
+                indices.graphics_family = Some(index);
+            }
+            let present_support = unsafe {
+                surface_loader
+                    .get_physical_device_surface_support(device, index, surface)
+                    .unwrap()
+            };
+            if present_support {
+                indices.present_family = Some(index);
             }
             if indices.is_complete() {
                 break;
@@ -203,20 +239,27 @@ impl HelloTriangleApp {
     fn create_logical_device(
         instance: &Instance,
         physical_device: vk::PhysicalDevice,
-    ) -> (Device, vk::Queue) {
-        let indices = Self::find_queue_familes(instance, physical_device);
+        indices: QueueFamilyIndices,
+    ) -> (Device, vk::Queue, vk::Queue) {
         let graphics_family_index = indices.graphics_family.unwrap();
+        let present_family_index = indices.present_family.unwrap();
+        let mut unique_queue_families = vec![graphics_family_index, present_family_index];
+        unique_queue_families.sort_unstable();
+        unique_queue_families.dedup();
         let queue_priority = 1.0;
-        let queue_create_info = vk::DeviceQueueCreateInfo {
-            queue_family_index: graphics_family_index,
-            queue_count: 1,
-            p_queue_priorities: &queue_priority,
-            ..Default::default()
-        };
+        let queue_create_infos: Vec<_> = unique_queue_families
+            .into_iter()
+            .map(|index| vk::DeviceQueueCreateInfo {
+                queue_family_index: index,
+                queue_count: 1,
+                p_queue_priorities: &queue_priority,
+                ..Default::default()
+            })
+            .collect();
         let device_features = vk::PhysicalDeviceFeatures::default();
         let mut device_create_info = vk::DeviceCreateInfo {
-            queue_create_info_count: 1,
-            p_queue_create_infos: &queue_create_info,
+            queue_create_info_count: queue_create_infos.len() as u32,
+            p_queue_create_infos: queue_create_infos.as_ptr(),
             p_enabled_features: &device_features,
             ..Default::default()
         };
@@ -232,7 +275,8 @@ impl HelloTriangleApp {
                 .expect("Failed to create logical device")
         };
         let graphics_queue = unsafe { device.get_device_queue(graphics_family_index, 0) };
-        (device, graphics_queue)
+        let present_queue = unsafe { device.get_device_queue(present_family_index, 0) };
+        (device, graphics_queue, present_queue)
     }
 
     pub fn run(&self) {}
@@ -246,6 +290,7 @@ impl Drop for HelloTriangleApp {
                 debug_utils.destroy_debug_utils_messenger(m, None);
             }
             self.device.destroy_device(None);
+            self.surface_loader.destroy_surface(self.surface, None);
             self.instance.destroy_instance(None);
         }
     }
@@ -254,11 +299,12 @@ impl Drop for HelloTriangleApp {
 #[derive(Default)]
 struct QueueFamilyIndices {
     graphics_family: Option<u32>,
+    present_family: Option<u32>,
 }
 
 impl QueueFamilyIndices {
     fn is_complete(&self) -> bool {
-        self.graphics_family.is_some()
+        self.graphics_family.is_some() && self.present_family.is_some()
     }
 }
 
