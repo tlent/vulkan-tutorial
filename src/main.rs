@@ -1,7 +1,9 @@
+use std::cmp;
 use std::ffi::{c_void, CStr, CString};
+use std::u32;
 
 use ash::extensions::ext::DebugUtils;
-use ash::extensions::khr::Surface;
+use ash::extensions::khr::{Surface, Swapchain};
 use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 use ash::{vk, Device, Entry, Instance};
 use lazy_static::lazy_static;
@@ -23,6 +25,7 @@ const VALIDATION_ENABLED: bool = false;
 lazy_static! {
     static ref VALIDATION_LAYERS: Vec<&'static CStr> =
         vec![CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap()];
+    static ref DEVICE_EXTENSIONS: Vec<&'static CStr> = vec![Swapchain::name()];
 }
 
 fn main() {
@@ -62,6 +65,11 @@ struct HelloTriangleApp {
     device: Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
+    swapchain: vk::SwapchainKHR,
+    swapchain_loader: Swapchain,
+    swapchain_images: Vec<vk::Image>,
+    swapchain_image_format: vk::Format,
+    swapchain_extent: vk::Extent2D,
 }
 
 impl HelloTriangleApp {
@@ -76,11 +84,19 @@ impl HelloTriangleApp {
         let surface =
             unsafe { ash_window::create_surface(&entry, &instance, window, None).unwrap() };
         let surface_loader = Surface::new(&entry, &instance);
-        let physical_device = Self::select_physical_device(&instance, &surface_loader, surface);
-        let queue_indices =
-            Self::find_queue_familes(&instance, &surface_loader, surface, physical_device);
+        let (physical_device, queue_family_indices) =
+            Self::select_physical_device(&instance, &surface_loader, surface);
         let (device, graphics_queue, present_queue) =
-            Self::create_logical_device(&instance, physical_device, queue_indices);
+            Self::create_logical_device(&instance, physical_device, queue_family_indices);
+        let swapchain_loader = Swapchain::new(&instance, &device);
+        let (swapchain, swapchain_images, swapchain_image_format, swapchain_extent) =
+            Self::create_swapchain(
+                &swapchain_loader,
+                &surface_loader,
+                surface,
+                physical_device,
+                queue_family_indices,
+            );
         Self {
             entry,
             instance,
@@ -91,6 +107,11 @@ impl HelloTriangleApp {
             device,
             graphics_queue,
             present_queue,
+            swapchain_loader,
+            swapchain,
+            swapchain_images,
+            swapchain_image_format,
+            swapchain_extent,
         }
     }
 
@@ -108,7 +129,9 @@ impl HelloTriangleApp {
         if VALIDATION_ENABLED {
             required_extensions.push(DebugUtils::name());
         }
-        if let Err(extension_name) = Self::check_extension_support(entry, &required_extensions) {
+        if let Err(extension_name) =
+            Self::check_instance_extension_support(entry, &required_extensions)
+        {
             panic!(
                 "Required extension {} is not supported.",
                 extension_name.to_string_lossy()
@@ -143,7 +166,7 @@ impl HelloTriangleApp {
         instance
     }
 
-    fn check_extension_support<'a>(
+    fn check_instance_extension_support<'a>(
         entry: &Entry,
         required_extensions: &[&'a CStr],
     ) -> Result<(), &'a CStr> {
@@ -191,12 +214,15 @@ impl HelloTriangleApp {
         instance: &Instance,
         surface_loader: &Surface,
         surface: vk::SurfaceKHR,
-    ) -> vk::PhysicalDevice {
+    ) -> (vk::PhysicalDevice, QueueFamilyIndices) {
         let devices = unsafe { instance.enumerate_physical_devices().unwrap() };
-        devices
-            .into_iter()
-            .find(|&d| Self::is_device_suitable(instance, surface_loader, surface, d))
-            .expect("Failed to find a suitable GPU")
+        for d in devices {
+            let indices = Self::find_queue_family_indices(instance, surface_loader, surface, d);
+            if Self::is_device_suitable(instance, surface_loader, surface, d, indices) {
+                return (d, indices);
+            }
+        }
+        panic!("Failed to find a suitable GPU");
     }
 
     fn is_device_suitable(
@@ -204,11 +230,26 @@ impl HelloTriangleApp {
         surface_loader: &Surface,
         surface: vk::SurfaceKHR,
         device: vk::PhysicalDevice,
+        indices: QueueFamilyIndices,
     ) -> bool {
-        Self::find_queue_familes(instance, surface_loader, surface, device).is_complete()
+        let supports_device_extensions =
+            match Self::check_device_extension_support(instance, device) {
+                Err(extension) => panic!(
+                    "Required device extension not supported: {}",
+                    extension.to_string_lossy()
+                ),
+                Ok(_) => true,
+            };
+        let is_swapchain_adequate = if supports_device_extensions {
+            let swapchain_support = Self::query_swapchain_support(surface_loader, surface, device);
+            !swapchain_support.formats.is_empty() && !swapchain_support.present_modes.is_empty()
+        } else {
+            false
+        };
+        indices.is_complete() && supports_device_extensions && is_swapchain_adequate
     }
 
-    fn find_queue_familes(
+    fn find_queue_family_indices(
         instance: &Instance,
         surface_loader: &Surface,
         surface: vk::SurfaceKHR,
@@ -236,13 +277,34 @@ impl HelloTriangleApp {
         indices
     }
 
+    fn check_device_extension_support(
+        instance: &Instance,
+        device: vk::PhysicalDevice,
+    ) -> Result<(), &'static CStr> {
+        let supported_extensions = unsafe {
+            instance
+                .enumerate_device_extension_properties(device)
+                .unwrap()
+        };
+        let supported_extension_refs: Vec<_> = supported_extensions
+            .iter()
+            .map(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) })
+            .collect();
+        for e in DEVICE_EXTENSIONS.iter() {
+            if !supported_extension_refs.contains(e) {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     fn create_logical_device(
         instance: &Instance,
         physical_device: vk::PhysicalDevice,
-        indices: QueueFamilyIndices,
+        queue_family_indices: QueueFamilyIndices,
     ) -> (Device, vk::Queue, vk::Queue) {
-        let graphics_family_index = indices.graphics_family.unwrap();
-        let present_family_index = indices.present_family.unwrap();
+        let graphics_family_index = queue_family_indices.graphics_family.unwrap();
+        let present_family_index = queue_family_indices.present_family.unwrap();
         let mut unique_queue_families = vec![graphics_family_index, present_family_index];
         unique_queue_families.sort_unstable();
         unique_queue_families.dedup();
@@ -257,10 +319,13 @@ impl HelloTriangleApp {
             })
             .collect();
         let device_features = vk::PhysicalDeviceFeatures::default();
+        let device_extension_refs: Vec<_> = DEVICE_EXTENSIONS.iter().map(|e| e.as_ptr()).collect();
         let mut device_create_info = vk::DeviceCreateInfo {
             queue_create_info_count: queue_create_infos.len() as u32,
             p_queue_create_infos: queue_create_infos.as_ptr(),
             p_enabled_features: &device_features,
+            enabled_extension_count: device_extension_refs.len() as u32,
+            pp_enabled_extension_names: device_extension_refs.as_ptr(),
             ..Default::default()
         };
         let layer_refs: Vec<_>;
@@ -279,24 +344,139 @@ impl HelloTriangleApp {
         (device, graphics_queue, present_queue)
     }
 
+    fn query_swapchain_support(
+        surface_loader: &Surface,
+        surface: vk::SurfaceKHR,
+        device: vk::PhysicalDevice,
+    ) -> SwapchainSupportDetails {
+        unsafe {
+            let capabilities = surface_loader
+                .get_physical_device_surface_capabilities(device, surface)
+                .unwrap();
+            let formats = surface_loader
+                .get_physical_device_surface_formats(device, surface)
+                .unwrap();
+            let present_modes = surface_loader
+                .get_physical_device_surface_present_modes(device, surface)
+                .unwrap();
+            SwapchainSupportDetails {
+                capabilities,
+                formats,
+                present_modes,
+            }
+        }
+    }
+
+    fn choose_swap_surface_format(
+        available_formats: &[vk::SurfaceFormatKHR],
+    ) -> vk::SurfaceFormatKHR {
+        available_formats
+            .iter()
+            .find(|f| {
+                f.format == vk::Format::B8G8R8_SRGB
+                    && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            })
+            .copied()
+            .unwrap_or(available_formats[0])
+    }
+
+    fn choose_swap_present_mode(available_modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
+        if available_modes.contains(&vk::PresentModeKHR::MAILBOX) {
+            vk::PresentModeKHR::MAILBOX
+        } else {
+            vk::PresentModeKHR::FIFO
+        }
+    }
+
+    fn choose_swap_extent(capabilities: vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
+        if capabilities.current_extent.width != u32::MAX {
+            return capabilities.current_extent;
+        }
+        let width = cmp::max(
+            capabilities.min_image_extent.width,
+            cmp::min(capabilities.max_image_extent.width, WINDOW_WIDTH),
+        );
+        let height = cmp::max(
+            capabilities.min_image_extent.height,
+            cmp::min(capabilities.max_image_extent.height, WINDOW_HEIGHT),
+        );
+        vk::Extent2D { width, height }
+    }
+
+    fn create_swapchain(
+        swapchain_loader: &Swapchain,
+        surface_loader: &Surface,
+        surface: vk::SurfaceKHR,
+        device: vk::PhysicalDevice,
+        indices: QueueFamilyIndices,
+    ) -> (vk::SwapchainKHR, Vec<vk::Image>, vk::Format, vk::Extent2D) {
+        let swapchain_support = Self::query_swapchain_support(surface_loader, surface, device);
+
+        let surface_format = Self::choose_swap_surface_format(&swapchain_support.formats);
+        let present_mode = Self::choose_swap_present_mode(&swapchain_support.present_modes);
+        let extent = Self::choose_swap_extent(swapchain_support.capabilities);
+        let mut image_count = swapchain_support.capabilities.min_image_count + 1;
+        let max_image_count = swapchain_support.capabilities.max_image_count;
+        if max_image_count > 0 && image_count > max_image_count {
+            image_count = max_image_count;
+        }
+
+        let mut create_info = vk::SwapchainCreateInfoKHR {
+            surface: surface,
+            min_image_count: image_count,
+            image_format: surface_format.format,
+            image_color_space: surface_format.color_space,
+            image_extent: extent,
+            image_array_layers: 1,
+            image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            image_sharing_mode: vk::SharingMode::EXCLUSIVE,
+            pre_transform: swapchain_support.capabilities.current_transform,
+            composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
+            present_mode: present_mode,
+            clipped: vk::TRUE,
+            ..Default::default()
+        };
+
+        let queue_family_indices: Vec<u32>;
+        if indices.graphics_family != indices.present_family {
+            queue_family_indices = vec![
+                indices.graphics_family.unwrap(),
+                indices.present_family.unwrap(),
+            ];
+            create_info.image_sharing_mode = vk::SharingMode::CONCURRENT;
+            create_info.queue_family_index_count = queue_family_indices.len() as u32;
+            create_info.p_queue_family_indices = queue_family_indices.as_ptr();
+        }
+
+        let swapchain = unsafe {
+            swapchain_loader
+                .create_swapchain(&create_info, None)
+                .unwrap()
+        };
+        let images = unsafe { swapchain_loader.get_swapchain_images(swapchain).unwrap() };
+        (swapchain, images, surface_format.format, extent)
+    }
+
     pub fn run(&self) {}
 }
 
 impl Drop for HelloTriangleApp {
     fn drop(&mut self) {
         unsafe {
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
+            self.device.destroy_device(None);
+            self.surface_loader.destroy_surface(self.surface, None);
             if let Some(m) = self.debug_messenger {
                 let debug_utils = DebugUtils::new(&self.entry, &self.instance);
                 debug_utils.destroy_debug_utils_messenger(m, None);
             }
-            self.device.destroy_device(None);
-            self.surface_loader.destroy_surface(self.surface, None);
             self.instance.destroy_instance(None);
         }
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct QueueFamilyIndices {
     graphics_family: Option<u32>,
     present_family: Option<u32>,
@@ -306,6 +486,12 @@ impl QueueFamilyIndices {
     fn is_complete(&self) -> bool {
         self.graphics_family.is_some() && self.present_family.is_some()
     }
+}
+
+struct SwapchainSupportDetails {
+    capabilities: vk::SurfaceCapabilitiesKHR,
+    formats: Vec<vk::SurfaceFormatKHR>,
+    present_modes: Vec<vk::PresentModeKHR>,
 }
 
 fn get_debug_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
