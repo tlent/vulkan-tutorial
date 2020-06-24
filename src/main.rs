@@ -78,6 +78,8 @@ struct HelloTriangleApp {
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
     swapchain_framebuffers: Vec<vk::Framebuffer>,
+    command_pool: vk::CommandPool,
+    command_buffers: Vec<vk::CommandBuffer>,
 }
 
 impl HelloTriangleApp {
@@ -116,6 +118,15 @@ impl HelloTriangleApp {
             render_pass,
             swapchain_extent,
         );
+        let command_pool = Self::create_command_pool(&device, queue_family_indices);
+        let command_buffers = Self::create_command_buffers(
+            &device,
+            command_pool,
+            render_pass,
+            &swapchain_framebuffers,
+            swapchain_extent,
+            graphics_pipeline,
+        );
         Self {
             entry,
             instance,
@@ -136,6 +147,8 @@ impl HelloTriangleApp {
             pipeline_layout,
             graphics_pipeline,
             swapchain_framebuffers,
+            command_pool,
+            command_buffers,
         }
     }
 
@@ -684,12 +697,74 @@ impl HelloTriangleApp {
             .collect()
     }
 
+    fn create_command_pool(device: &Device, indices: QueueFamilyIndices) -> vk::CommandPool {
+        let create_info = vk::CommandPoolCreateInfo {
+            queue_family_index: indices.graphics_family.unwrap(),
+            ..Default::default()
+        };
+
+        unsafe { device.create_command_pool(&create_info, None).unwrap() }
+    }
+
+    fn create_command_buffers(
+        device: &Device,
+        command_pool: vk::CommandPool,
+        render_pass: vk::RenderPass,
+        framebuffers: &[vk::Framebuffer],
+        extent: vk::Extent2D,
+        pipeline: vk::Pipeline,
+    ) -> Vec<vk::CommandBuffer> {
+        let create_info = vk::CommandBufferAllocateInfo {
+            command_pool,
+            level: vk::CommandBufferLevel::PRIMARY,
+            command_buffer_count: framebuffers.len() as u32,
+            ..Default::default()
+        };
+        let command_buffers = unsafe { device.allocate_command_buffers(&create_info).unwrap() };
+        for (&command_buffer, &framebuffer) in command_buffers.iter().zip(framebuffers) {
+            let begin_info = vk::CommandBufferBeginInfo::default();
+            let render_area = vk::Rect2D {
+                extent,
+                offset: vk::Offset2D { x: 0, y: 0 },
+            };
+            let clear_color = vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            };
+            let render_pass_info = vk::RenderPassBeginInfo {
+                render_pass,
+                framebuffer,
+                render_area,
+                clear_value_count: 1,
+                p_clear_values: &clear_color,
+                ..Default::default()
+            };
+            unsafe {
+                device
+                    .begin_command_buffer(command_buffer, &begin_info)
+                    .unwrap();
+                device.cmd_begin_render_pass(
+                    command_buffer,
+                    &render_pass_info,
+                    vk::SubpassContents::INLINE,
+                );
+                device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                device.cmd_draw(command_buffer, 3, 1, 0, 0);
+                device.cmd_end_render_pass(command_buffer);
+                device.end_command_buffer(command_buffer).unwrap();
+            }
+        }
+        command_buffers
+    }
+
     pub fn run(&self) {}
 }
 
 impl Drop for HelloTriangleApp {
     fn drop(&mut self) {
         unsafe {
+            self.device.destroy_command_pool(self.command_pool, None);
             for &f in &self.swapchain_framebuffers {
                 self.device.destroy_framebuffer(f, None);
             }
