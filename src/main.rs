@@ -77,6 +77,7 @@ struct HelloTriangleApp {
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
+    swapchain_framebuffers: Vec<vk::Framebuffer>,
 }
 
 impl HelloTriangleApp {
@@ -109,6 +110,12 @@ impl HelloTriangleApp {
         let render_pass = Self::create_render_pass(&device, swapchain_image_format);
         let (graphics_pipeline, pipeline_layout) =
             Self::create_graphics_pipeline(&device, render_pass, swapchain_extent);
+        let swapchain_framebuffers = Self::create_framebuffers(
+            &device,
+            &swapchain_imageviews,
+            render_pass,
+            swapchain_extent,
+        );
         Self {
             entry,
             instance,
@@ -128,6 +135,7 @@ impl HelloTriangleApp {
             render_pass,
             pipeline_layout,
             graphics_pipeline,
+            swapchain_framebuffers,
         }
     }
 
@@ -652,12 +660,39 @@ impl HelloTriangleApp {
         unsafe { device.create_shader_module(&create_info, None).unwrap() }
     }
 
+    fn create_framebuffers(
+        device: &Device,
+        imageviews: &[vk::ImageView],
+        render_pass: vk::RenderPass,
+        extent: vk::Extent2D,
+    ) -> Vec<vk::Framebuffer> {
+        imageviews
+            .iter()
+            .map(|v| {
+                let create_info = vk::FramebufferCreateInfo {
+                    render_pass,
+                    attachment_count: 1,
+                    p_attachments: v,
+                    width: extent.width,
+                    height: extent.height,
+                    layers: 1,
+                    ..Default::default()
+                };
+
+                unsafe { device.create_framebuffer(&create_info, None).unwrap() }
+            })
+            .collect()
+    }
+
     pub fn run(&self) {}
 }
 
 impl Drop for HelloTriangleApp {
     fn drop(&mut self) {
         unsafe {
+            for &f in &self.swapchain_framebuffers {
+                self.device.destroy_framebuffer(f, None);
+            }
             self.device.destroy_pipeline(self.graphics_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
