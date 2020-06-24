@@ -17,13 +17,15 @@ use winit::{
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
 
+const MAX_FRAMES_IN_FLIGHT: u32 = 2;
+
+const VERT_SHADER_BYTES: &[u8] = include_bytes!("shaders/vert.spv");
+const FRAG_SHADER_BYTES: &[u8] = include_bytes!("shaders/frag.spv");
+
 #[cfg(debug_assertions)]
 const VALIDATION_ENABLED: bool = true;
 #[cfg(not(debug_assertions))]
 const VALIDATION_ENABLED: bool = false;
-
-const VERT_SHADER_BYTES: &[u8] = include_bytes!("shaders/vert.spv");
-const FRAG_SHADER_BYTES: &[u8] = include_bytes!("shaders/frag.spv");
 
 lazy_static! {
     static ref VALIDATION_LAYERS: Vec<&'static CStr> =
@@ -33,7 +35,7 @@ lazy_static! {
 
 fn main() {
     let (window, event_loop) = init_window();
-    let app = HelloTriangleApp::new(&window);
+    let mut app = HelloTriangleApp::new(&window);
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
         match event {
@@ -41,7 +43,9 @@ fn main() {
                 event: WindowEvent::CloseRequested,
                 ..
             } => *control_flow = ControlFlow::Exit,
-            Event::MainEventsCleared => app.run(),
+            Event::MainEventsCleared => {
+                app.draw_frame();
+            }
             _ => (),
         }
     });
@@ -80,6 +84,11 @@ struct HelloTriangleApp {
     swapchain_framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    in_flight_fences: Vec<vk::Fence>,
+    images_in_flight: Vec<Option<vk::Fence>>,
+    current_frame: u32,
 }
 
 impl HelloTriangleApp {
@@ -127,6 +136,12 @@ impl HelloTriangleApp {
             swapchain_extent,
             graphics_pipeline,
         );
+        let (
+            image_available_semaphores,
+            render_finished_semaphores,
+            in_flight_fences,
+            images_in_flight,
+        ) = Self::create_sync_objects(&device, swapchain_images.len());
         Self {
             entry,
             instance,
@@ -149,6 +164,11 @@ impl HelloTriangleApp {
             swapchain_framebuffers,
             command_pool,
             command_buffers,
+            image_available_semaphores,
+            render_finished_semaphores,
+            in_flight_fences,
+            images_in_flight,
+            current_frame: 0,
         }
     }
 
@@ -543,11 +563,22 @@ impl HelloTriangleApp {
             ..Default::default()
         };
 
+        let subpass_dependency = vk::SubpassDependency {
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            dst_subpass: 0,
+            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ..Default::default()
+        };
+
         let create_info = vk::RenderPassCreateInfo {
             attachment_count: 1,
             p_attachments: &color_attachment,
             subpass_count: 1,
             p_subpasses: &subpass,
+            dependency_count: 1,
+            p_dependencies: &subpass_dependency,
             ..Default::default()
         };
 
@@ -758,12 +789,123 @@ impl HelloTriangleApp {
         command_buffers
     }
 
-    pub fn run(&self) {}
+    fn create_sync_objects(
+        device: &Device,
+        image_count: usize,
+    ) -> (
+        Vec<vk::Semaphore>,
+        Vec<vk::Semaphore>,
+        Vec<vk::Fence>,
+        Vec<Option<vk::Fence>>,
+    ) {
+        let semaphore_info = vk::SemaphoreCreateInfo::default();
+        let fence_info = vk::FenceCreateInfo {
+            flags: vk::FenceCreateFlags::SIGNALED,
+            ..Default::default()
+        };
+        let mut image_available_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
+        let mut render_finished_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
+        let mut in_flight_fences = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT as usize);
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let semaphore = unsafe { device.create_semaphore(&semaphore_info, None).unwrap() };
+            image_available_semaphores.push(semaphore);
+            let semaphore = unsafe { device.create_semaphore(&semaphore_info, None).unwrap() };
+            render_finished_semaphores.push(semaphore);
+            let fence = unsafe { device.create_fence(&fence_info, None).unwrap() };
+            in_flight_fences.push(fence);
+        }
+        let images_in_flight = vec![None; image_count];
+        (
+            image_available_semaphores,
+            render_finished_semaphores,
+            in_flight_fences,
+            images_in_flight,
+        )
+    }
+
+    pub fn draw_frame(&mut self) {
+        let current_frame = self.current_frame as usize;
+        let current_in_flight_fence = self.in_flight_fences[current_frame];
+        unsafe {
+            self.device
+                .wait_for_fences(&[current_in_flight_fence], true, std::u64::MAX)
+                .unwrap();
+        }
+        let (image_index, _) = unsafe {
+            self.swapchain_loader
+                .acquire_next_image(
+                    self.swapchain,
+                    std::u64::MAX,
+                    self.image_available_semaphores[current_frame],
+                    vk::Fence::null(),
+                )
+                .unwrap()
+        };
+
+        let current_image_fence = &mut self.images_in_flight[image_index as usize];
+        if let Some(fence) = *current_image_fence {
+            unsafe {
+                self.device
+                    .wait_for_fences(&[fence], true, std::u64::MAX)
+                    .unwrap();
+            }
+        }
+
+        *current_image_fence = Some(current_in_flight_fence);
+
+        let submit_info = vk::SubmitInfo {
+            wait_semaphore_count: 1,
+            p_wait_semaphores: &self.image_available_semaphores[current_frame],
+            p_wait_dst_stage_mask: &vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            command_buffer_count: 1,
+            p_command_buffers: &self.command_buffers[image_index as usize],
+            signal_semaphore_count: 1,
+            p_signal_semaphores: &self.render_finished_semaphores[current_frame],
+            ..Default::default()
+        };
+        unsafe {
+            self.device
+                .reset_fences(&[current_in_flight_fence])
+                .unwrap();
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], current_in_flight_fence)
+                .unwrap();
+        }
+
+        let present_info = vk::PresentInfoKHR {
+            wait_semaphore_count: 1,
+            p_wait_semaphores: &self.render_finished_semaphores[current_frame],
+            swapchain_count: 1,
+            p_swapchains: &self.swapchain,
+            p_image_indices: &image_index,
+            ..Default::default()
+        };
+
+        unsafe {
+            self.swapchain_loader
+                .queue_present(self.graphics_queue, &present_info)
+                .unwrap();
+            self.device.queue_wait_idle(self.graphics_queue).unwrap();
+        }
+
+        self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+    }
 }
 
 impl Drop for HelloTriangleApp {
     fn drop(&mut self) {
         unsafe {
+            self.device.device_wait_idle().unwrap();
+            let semaphores = self
+                .image_available_semaphores
+                .iter()
+                .chain(&self.render_finished_semaphores);
+            for &semaphore in semaphores {
+                self.device.destroy_semaphore(semaphore, None);
+            }
+            for &fence in &self.in_flight_fences {
+                self.device.destroy_fence(fence, None);
+            }
             self.device.destroy_command_pool(self.command_pool, None);
             for &f in &self.swapchain_framebuffers {
                 self.device.destroy_framebuffer(f, None);
