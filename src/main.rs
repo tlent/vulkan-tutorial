@@ -39,10 +39,11 @@ fn main() {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
         match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => *control_flow = ControlFlow::Exit,
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                WindowEvent::Resized(size) => app.window_resize((size.width, size.height)),
+                _ => (),
+            },
             Event::MainEventsCleared => {
                 app.draw_frame();
             }
@@ -63,12 +64,15 @@ fn init_window() -> (Window, EventLoop<()>) {
 }
 
 struct HelloTriangleApp {
+    window_size: (u32, u32),
+    window_size_changed: bool,
     entry: Entry,
     instance: Instance,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     surface: vk::SurfaceKHR,
     surface_loader: Surface,
     physical_device: vk::PhysicalDevice,
+    queue_family_indices: QueueFamilyIndices,
     device: Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
@@ -93,6 +97,8 @@ struct HelloTriangleApp {
 
 impl HelloTriangleApp {
     pub fn new(window: &Window) -> Self {
+        let window_size = window.inner_size();
+        let window_size = (window_size.width, window_size.height);
         let entry = Entry::new().unwrap();
         let instance = Self::create_instance(&entry, window);
         let debug_messenger = if VALIDATION_ENABLED {
@@ -115,6 +121,7 @@ impl HelloTriangleApp {
                 surface,
                 physical_device,
                 queue_family_indices,
+                window_size,
             );
         let swapchain_imageviews =
             Self::create_imageviews(&device, &swapchain_images, swapchain_image_format);
@@ -143,12 +150,14 @@ impl HelloTriangleApp {
             images_in_flight,
         ) = Self::create_sync_objects(&device, swapchain_images.len());
         Self {
+            window_size,
             entry,
             instance,
             debug_messenger,
             surface,
             surface_loader,
             physical_device,
+            queue_family_indices,
             device,
             graphics_queue,
             present_queue,
@@ -168,6 +177,7 @@ impl HelloTriangleApp {
             render_finished_semaphores,
             in_flight_fences,
             images_in_flight,
+            window_size_changed: false,
             current_frame: 0,
         }
     }
@@ -445,17 +455,21 @@ impl HelloTriangleApp {
         }
     }
 
-    fn choose_swap_extent(capabilities: vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
+    fn choose_swap_extent(
+        capabilities: vk::SurfaceCapabilitiesKHR,
+        window_size: (u32, u32),
+    ) -> vk::Extent2D {
         if capabilities.current_extent.width != u32::MAX {
             return capabilities.current_extent;
         }
+        let (window_width, window_height) = window_size;
         let width = cmp::max(
             capabilities.min_image_extent.width,
-            cmp::min(capabilities.max_image_extent.width, WINDOW_WIDTH),
+            cmp::min(capabilities.max_image_extent.width, window_width),
         );
         let height = cmp::max(
             capabilities.min_image_extent.height,
-            cmp::min(capabilities.max_image_extent.height, WINDOW_HEIGHT),
+            cmp::min(capabilities.max_image_extent.height, window_height),
         );
         vk::Extent2D { width, height }
     }
@@ -466,12 +480,13 @@ impl HelloTriangleApp {
         surface: vk::SurfaceKHR,
         device: vk::PhysicalDevice,
         indices: QueueFamilyIndices,
+        window_size: (u32, u32),
     ) -> (vk::SwapchainKHR, Vec<vk::Image>, vk::Format, vk::Extent2D) {
         let swapchain_support = Self::query_swapchain_support(surface_loader, surface, device);
 
         let surface_format = Self::choose_swap_surface_format(&swapchain_support.formats);
         let present_mode = Self::choose_swap_present_mode(&swapchain_support.present_modes);
-        let extent = Self::choose_swap_extent(swapchain_support.capabilities);
+        let extent = Self::choose_swap_extent(swapchain_support.capabilities, window_size);
         let mut image_count = swapchain_support.capabilities.min_image_count + 1;
         let max_image_count = swapchain_support.capabilities.max_image_count;
         if max_image_count > 0 && image_count > max_image_count {
@@ -831,16 +846,19 @@ impl HelloTriangleApp {
                 .wait_for_fences(&[current_in_flight_fence], true, std::u64::MAX)
                 .unwrap();
         }
-        let (image_index, _) = unsafe {
-            self.swapchain_loader
-                .acquire_next_image(
-                    self.swapchain,
-                    std::u64::MAX,
-                    self.image_available_semaphores[current_frame],
-                    vk::Fence::null(),
-                )
-                .unwrap()
+        let result = unsafe {
+            self.swapchain_loader.acquire_next_image(
+                self.swapchain,
+                std::u64::MAX,
+                self.image_available_semaphores[current_frame],
+                vk::Fence::null(),
+            )
         };
+        if let Err(vk::Result::ERROR_OUT_OF_DATE_KHR) = result {
+            self.recreate_swapchain();
+            return;
+        }
+        let (image_index, _) = result.unwrap();
 
         let current_image_fence = &mut self.images_in_flight[image_index as usize];
         if let Some(fence) = *current_image_fence {
@@ -881,32 +899,72 @@ impl HelloTriangleApp {
             ..Default::default()
         };
 
-        unsafe {
+        let result = unsafe {
             self.swapchain_loader
                 .queue_present(self.graphics_queue, &present_info)
-                .unwrap();
-            self.device.queue_wait_idle(self.graphics_queue).unwrap();
+        };
+
+        let is_swapchain_suboptimal = result.is_ok() && *result.as_ref().unwrap() == true;
+        let is_swapchain_out_of_date =
+            result.is_err() && *result.as_ref().unwrap_err() == vk::Result::ERROR_OUT_OF_DATE_KHR;
+        if self.window_size_changed || is_swapchain_suboptimal || is_swapchain_out_of_date {
+            self.recreate_swapchain();
+        } else {
+            result.unwrap();
         }
 
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
-}
 
-impl Drop for HelloTriangleApp {
-    fn drop(&mut self) {
+    pub fn recreate_swapchain(&mut self) {
+        unsafe { self.device.device_wait_idle().unwrap() };
+
+        self.window_size_changed = false;
+        self.cleanup_swapchain();
+        let (swapchain, swapchain_images, swapchain_image_format, swapchain_extent) =
+            Self::create_swapchain(
+                &self.swapchain_loader,
+                &self.surface_loader,
+                self.surface,
+                self.physical_device,
+                self.queue_family_indices,
+                self.window_size,
+            );
+        let swapchain_imageviews =
+            Self::create_imageviews(&self.device, &swapchain_images, swapchain_image_format);
+        let render_pass = Self::create_render_pass(&self.device, swapchain_image_format);
+        let (graphics_pipeline, pipeline_layout) =
+            Self::create_graphics_pipeline(&self.device, render_pass, swapchain_extent);
+        let swapchain_framebuffers = Self::create_framebuffers(
+            &self.device,
+            &swapchain_imageviews,
+            render_pass,
+            swapchain_extent,
+        );
+        let command_buffers = Self::create_command_buffers(
+            &self.device,
+            self.command_pool,
+            render_pass,
+            &swapchain_framebuffers,
+            swapchain_extent,
+            graphics_pipeline,
+        );
+        self.swapchain = swapchain;
+        self.swapchain_images = swapchain_images;
+        self.swapchain_image_format = swapchain_image_format;
+        self.swapchain_extent = swapchain_extent;
+        self.swapchain_imageviews = swapchain_imageviews;
+        self.render_pass = render_pass;
+        self.graphics_pipeline = graphics_pipeline;
+        self.pipeline_layout = pipeline_layout;
+        self.swapchain_framebuffers = swapchain_framebuffers;
+        self.command_buffers = command_buffers;
+    }
+
+    fn cleanup_swapchain(&self) {
         unsafe {
-            self.device.device_wait_idle().unwrap();
-            let semaphores = self
-                .image_available_semaphores
-                .iter()
-                .chain(&self.render_finished_semaphores);
-            for &semaphore in semaphores {
-                self.device.destroy_semaphore(semaphore, None);
-            }
-            for &fence in &self.in_flight_fences {
-                self.device.destroy_fence(fence, None);
-            }
-            self.device.destroy_command_pool(self.command_pool, None);
+            self.device
+                .free_command_buffers(self.command_pool, &self.command_buffers);
             for &f in &self.swapchain_framebuffers {
                 self.device.destroy_framebuffer(f, None);
             }
@@ -919,6 +977,32 @@ impl Drop for HelloTriangleApp {
             }
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
+        }
+    }
+
+    pub fn window_resize(&mut self, window_size: (u32, u32)) {
+        self.window_size = window_size;
+        self.window_size_changed = true;
+    }
+}
+
+impl Drop for HelloTriangleApp {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.device_wait_idle().unwrap();
+
+            self.cleanup_swapchain();
+            let semaphores = self
+                .image_available_semaphores
+                .iter()
+                .chain(&self.render_finished_semaphores);
+            for &semaphore in semaphores {
+                self.device.destroy_semaphore(semaphore, None);
+            }
+            for &fence in &self.in_flight_fences {
+                self.device.destroy_fence(fence, None);
+            }
+            self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
             if let Some(m) = self.debug_messenger {
