@@ -36,19 +36,30 @@ lazy_static! {
 fn main() {
     let (window, event_loop) = init_window();
     let mut app = HelloTriangleApp::new(&window);
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
-        match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-                WindowEvent::Resized(size) => app.window_resize((size.width, size.height)),
-                _ => (),
-            },
-            Event::MainEventsCleared => {
-                app.draw_frame();
+    let mut pause_rendering = false;
+    event_loop.run(move |event, _, control_flow| match event {
+        Event::WindowEvent { event, .. } => match event {
+            WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+            WindowEvent::Resized(size) => {
+                let size: (u32, u32) = size.into();
+                if size == (0, 0) {
+                    pause_rendering = true;
+                    *control_flow = ControlFlow::Wait;
+                } else {
+                    pause_rendering = false;
+                    *control_flow = ControlFlow::Poll;
+                }
+                app.window_resize(size)
             }
             _ => (),
+        },
+        Event::MainEventsCleared => {
+            if pause_rendering {
+                return;
+            }
+            app.draw_frame();
         }
+        _ => (),
     });
 }
 
@@ -97,8 +108,7 @@ struct HelloTriangleApp {
 
 impl HelloTriangleApp {
     pub fn new(window: &Window) -> Self {
-        let window_size = window.inner_size();
-        let window_size = (window_size.width, window_size.height);
+        let window_size = window.inner_size().into();
         let entry = Entry::new().unwrap();
         let instance = Self::create_instance(&entry, window);
         let debug_messenger = if VALIDATION_ENABLED {
