@@ -132,6 +132,7 @@ impl HelloTriangleApp {
                 physical_device,
                 queue_family_indices,
                 window_size,
+                None,
             );
         let swapchain_imageviews =
             Self::create_imageviews(&device, &swapchain_images, swapchain_image_format);
@@ -491,6 +492,7 @@ impl HelloTriangleApp {
         device: vk::PhysicalDevice,
         indices: QueueFamilyIndices,
         window_size: (u32, u32),
+        old_swapchain: Option<vk::SwapchainKHR>,
     ) -> (vk::SwapchainKHR, Vec<vk::Image>, vk::Format, vk::Extent2D) {
         let swapchain_support = Self::query_swapchain_support(surface_loader, surface, device);
 
@@ -519,6 +521,10 @@ impl HelloTriangleApp {
             ..Default::default()
         };
 
+        if let Some(sc) = old_swapchain {
+            create_info.old_swapchain = sc;
+        }
+
         let queue_family_indices: Vec<u32>;
         if indices.graphics_family != indices.present_family {
             queue_family_indices = vec![
@@ -535,6 +541,13 @@ impl HelloTriangleApp {
                 .create_swapchain(&create_info, None)
                 .unwrap()
         };
+
+        if let Some(sc) = old_swapchain {
+            unsafe {
+                swapchain_loader.destroy_swapchain(sc, None);
+            }
+        }
+
         let images = unsafe { swapchain_loader.get_swapchain_images(swapchain).unwrap() };
         (swapchain, images, surface_format.format, extent)
     }
@@ -939,6 +952,7 @@ impl HelloTriangleApp {
                 self.physical_device,
                 self.queue_family_indices,
                 self.window_size,
+                Some(self.swapchain),
             );
         let swapchain_imageviews =
             Self::create_imageviews(&self.device, &swapchain_images, swapchain_image_format);
@@ -985,8 +999,6 @@ impl HelloTriangleApp {
             for &v in &self.swapchain_imageviews {
                 self.device.destroy_image_view(v, None);
             }
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain, None);
         }
     }
 
@@ -1001,7 +1013,6 @@ impl Drop for HelloTriangleApp {
         unsafe {
             self.device.device_wait_idle().unwrap();
 
-            self.cleanup_swapchain();
             let semaphores = self
                 .image_available_semaphores
                 .iter()
@@ -1012,6 +1023,9 @@ impl Drop for HelloTriangleApp {
             for &fence in &self.in_flight_fences {
                 self.device.destroy_fence(fence, None);
             }
+            self.cleanup_swapchain();
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
