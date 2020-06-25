@@ -854,11 +854,14 @@ impl HelloTriangleApp {
                 vk::Fence::null(),
             )
         };
-        if let Err(vk::Result::ERROR_OUT_OF_DATE_KHR) = result {
-            self.recreate_swapchain();
-            return;
-        }
-        let (image_index, _) = result.unwrap();
+        let image_index = match result {
+            Ok((i, false)) => i,
+            Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                self.recreate_swapchain();
+                return;
+            }
+            Err(e) => panic!(e),
+        };
 
         let current_image_fence = &mut self.images_in_flight[image_index as usize];
         if let Some(fence) = *current_image_fence {
@@ -904,14 +907,11 @@ impl HelloTriangleApp {
                 .queue_present(self.graphics_queue, &present_info)
         };
 
-        let is_swapchain_suboptimal = result.is_ok() && *result.as_ref().unwrap() == true;
-        let is_swapchain_out_of_date =
-            result.is_err() && *result.as_ref().unwrap_err() == vk::Result::ERROR_OUT_OF_DATE_KHR;
-        if self.window_size_changed || is_swapchain_suboptimal || is_swapchain_out_of_date {
-            self.recreate_swapchain();
-        } else {
-            result.unwrap();
-        }
+        match result {
+            Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.recreate_swapchain(),
+            Err(e) => panic!(e),
+            Ok(false) => (),
+        };
 
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
