@@ -930,7 +930,7 @@ impl HelloTriangleApp {
                 .queue_present(self.graphics_queue, &present_info)
         };
 
-        match result {
+        match result.map(|is_suboptimal| is_suboptimal || self.window_size_changed) {
             Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.recreate_swapchain(),
             Err(e) => panic!(e),
             Ok(false) => (),
