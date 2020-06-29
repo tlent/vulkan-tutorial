@@ -167,8 +167,13 @@ impl HelloTriangleApp {
             swapchain_extent,
         );
         let command_pool = Self::create_command_pool(&device, queue_family_indices);
-        let (vertex_buffer, vertex_buffer_memory) =
-            Self::create_vertex_buffer(&instance, physical_device, &device);
+        let (vertex_buffer, vertex_buffer_memory) = Self::create_vertex_buffer(
+            &instance,
+            &device,
+            physical_device,
+            graphics_queue,
+            command_pool,
+        );
         let command_buffers = Self::create_command_buffers(
             &device,
             command_pool,
@@ -809,14 +814,17 @@ impl HelloTriangleApp {
         unsafe { device.create_command_pool(&create_info, None).unwrap() }
     }
 
-    fn create_vertex_buffer(
+    fn create_buffer(
         instance: &Instance,
         physical_device: vk::PhysicalDevice,
         device: &Device,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+        memory_properties: vk::MemoryPropertyFlags,
     ) -> (vk::Buffer, vk::DeviceMemory) {
         let buffer_info = vk::BufferCreateInfo {
-            size: (VERTICES.len() * mem::size_of::<Vertex>()) as vk::DeviceSize,
-            usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+            size,
+            usage,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
             ..Default::default()
         };
@@ -827,7 +835,7 @@ impl HelloTriangleApp {
             instance,
             physical_device,
             mem_requirements.memory_type_bits,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            memory_properties,
         );
         let alloc_info = vk::MemoryAllocateInfo {
             allocation_size: mem_requirements.size,
@@ -838,19 +846,118 @@ impl HelloTriangleApp {
 
         unsafe {
             device.bind_buffer_memory(buffer, buffer_memory, 0).unwrap();
+        }
+        (buffer, buffer_memory)
+    }
+
+    fn copy_buffer(
+        device: &Device,
+        transfer_queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        src: vk::Buffer,
+        dst: vk::Buffer,
+        size: vk::DeviceSize,
+    ) {
+        let alloc_info = vk::CommandBufferAllocateInfo {
+            level: vk::CommandBufferLevel::PRIMARY,
+            command_pool,
+            command_buffer_count: 1,
+            ..Default::default()
+        };
+
+        unsafe {
+            let command_buffer = device.allocate_command_buffers(&alloc_info).unwrap()[0];
+            device
+                .begin_command_buffer(
+                    command_buffer,
+                    &vk::CommandBufferBeginInfo {
+                        flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            device.cmd_copy_buffer(
+                command_buffer,
+                src,
+                dst,
+                &[vk::BufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size,
+                }],
+            );
+            device.end_command_buffer(command_buffer).unwrap();
+
+            device
+                .queue_submit(
+                    transfer_queue,
+                    &[vk::SubmitInfo {
+                        command_buffer_count: 1,
+                        p_command_buffers: &command_buffer,
+                        ..Default::default()
+                    }],
+                    vk::Fence::null(),
+                )
+                .unwrap();
+            device.queue_wait_idle(transfer_queue).unwrap();
+            device.free_command_buffers(command_pool, &[command_buffer]);
+        }
+    }
+
+    fn create_vertex_buffer(
+        instance: &Instance,
+        device: &Device,
+        physical_device: vk::PhysicalDevice,
+        transfer_queue: vk::Queue,
+        command_pool: vk::CommandPool,
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        let buffer_size = (VERTICES.len() * mem::size_of::<Vertex>()) as vk::DeviceSize;
+        let (staging_buffer, staging_buffer_memory) = Self::create_buffer(
+            instance,
+            physical_device,
+            device,
+            buffer_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+
+        unsafe {
             let data = device
                 .map_memory(
-                    buffer_memory,
+                    staging_buffer_memory,
                     0,
-                    buffer_info.size,
+                    buffer_size,
                     vk::MemoryMapFlags::default(),
                 )
                 .unwrap();
             ptr::copy_nonoverlapping(VERTICES.as_ptr(), data as *mut Vertex, VERTICES.len());
-            device.unmap_memory(buffer_memory);
+            device.unmap_memory(staging_buffer_memory);
         }
 
-        (buffer, buffer_memory)
+        let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer(
+            instance,
+            physical_device,
+            device,
+            buffer_size,
+            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        );
+
+        Self::copy_buffer(
+            device,
+            transfer_queue,
+            command_pool,
+            staging_buffer,
+            vertex_buffer,
+            buffer_size,
+        );
+
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_buffer_memory, None);
+        }
+
+        (vertex_buffer, vertex_buffer_memory)
     }
 
     fn find_memory_type(
