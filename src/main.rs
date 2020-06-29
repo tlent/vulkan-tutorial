@@ -1,6 +1,7 @@
 use std::cmp;
 use std::ffi::{c_void, CStr, CString};
 use std::mem;
+use std::ptr;
 use std::u32;
 
 use ash::extensions::ext::DebugUtils;
@@ -37,14 +38,14 @@ lazy_static! {
     static ref VERTICES: Vec<Vertex> = vec![
         Vertex {
             position: glm::vec2(0.0, -0.5),
-            color: glm::vec3(1.0, 0.0, 0.0)
-        },
-        Vertex {
-            position: glm::vec2(-0.5, 0.5),
-            color: glm::vec3(0.0, 1.0, 0.0)
+            color: glm::vec3(1.0, 1.0, 1.0)
         },
         Vertex {
             position: glm::vec2(0.5, 0.5),
+            color: glm::vec3(0.0, 1.0, 0.0)
+        },
+        Vertex {
+            position: glm::vec2(-0.5, 0.5),
             color: glm::vec3(0.0, 0.0, 1.0)
         },
     ];
@@ -115,6 +116,8 @@ struct HelloTriangleApp {
     graphics_pipeline: vk::Pipeline,
     swapchain_framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_memory: vk::DeviceMemory,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
@@ -163,11 +166,14 @@ impl HelloTriangleApp {
             swapchain_extent,
         );
         let command_pool = Self::create_command_pool(&device, queue_family_indices);
+        let (vertex_buffer, vertex_buffer_memory) =
+            Self::create_vertex_buffer(&instance, physical_device, &device);
         let command_buffers = Self::create_command_buffers(
             &device,
             command_pool,
             render_pass,
             &swapchain_framebuffers,
+            vertex_buffer,
             swapchain_extent,
             graphics_pipeline,
         );
@@ -200,6 +206,8 @@ impl HelloTriangleApp {
             graphics_pipeline,
             swapchain_framebuffers,
             command_pool,
+            vertex_buffer,
+            vertex_buffer_memory,
             command_buffers,
             image_available_semaphores,
             render_finished_semaphores,
@@ -800,11 +808,72 @@ impl HelloTriangleApp {
         unsafe { device.create_command_pool(&create_info, None).unwrap() }
     }
 
+    fn create_vertex_buffer(
+        instance: &Instance,
+        physical_device: vk::PhysicalDevice,
+        device: &Device,
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        let buffer_info = vk::BufferCreateInfo {
+            size: (VERTICES.len() * mem::size_of::<Vertex>()) as vk::DeviceSize,
+            usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+        let buffer = unsafe { device.create_buffer(&buffer_info, None).unwrap() };
+
+        let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let memory_type_index = Self::find_memory_type(
+            instance,
+            physical_device,
+            mem_requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+        let alloc_info = vk::MemoryAllocateInfo {
+            allocation_size: mem_requirements.size,
+            memory_type_index,
+            ..Default::default()
+        };
+        let buffer_memory = unsafe { device.allocate_memory(&alloc_info, None).unwrap() };
+
+        unsafe {
+            device.bind_buffer_memory(buffer, buffer_memory, 0).unwrap();
+            let data = device
+                .map_memory(
+                    buffer_memory,
+                    0,
+                    buffer_info.size,
+                    vk::MemoryMapFlags::default(),
+                )
+                .unwrap();
+            ptr::copy_nonoverlapping(VERTICES.as_ptr(), data as *mut Vertex, VERTICES.len());
+            device.unmap_memory(buffer_memory);
+        }
+
+        (buffer, buffer_memory)
+    }
+
+    fn find_memory_type(
+        instance: &Instance,
+        physical_device: vk::PhysicalDevice,
+        type_filter: u32,
+        properties: vk::MemoryPropertyFlags,
+    ) -> u32 {
+        let mem_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        for (i, mem_type) in mem_properties.memory_types.iter().enumerate() {
+            if type_filter & (1 << i) > 0 && mem_type.property_flags.contains(properties) {
+                return i as u32;
+            }
+        }
+        panic!("failed to find suitable memory type");
+    }
+
     fn create_command_buffers(
         device: &Device,
         command_pool: vk::CommandPool,
         render_pass: vk::RenderPass,
         framebuffers: &[vk::Framebuffer],
+        vertex_buffer: vk::Buffer,
         extent: vk::Extent2D,
         pipeline: vk::Pipeline,
     ) -> Vec<vk::CommandBuffer> {
@@ -844,7 +913,8 @@ impl HelloTriangleApp {
                     vk::SubpassContents::INLINE,
                 );
                 device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                device.cmd_draw(command_buffer, 3, 1, 0, 0);
+                device.cmd_bind_vertex_buffers(command_buffer, 0, &[vertex_buffer], &[0]);
+                device.cmd_draw(command_buffer, VERTICES.len() as u32, 1, 0, 0);
                 device.cmd_end_render_pass(command_buffer);
                 device.end_command_buffer(command_buffer).unwrap();
             }
@@ -995,6 +1065,7 @@ impl HelloTriangleApp {
             self.command_pool,
             render_pass,
             &swapchain_framebuffers,
+            self.vertex_buffer,
             swapchain_extent,
             graphics_pipeline,
         );
@@ -1049,6 +1120,8 @@ impl Drop for HelloTriangleApp {
                 self.device.destroy_fence(fence, None);
             }
             self.cleanup_swapchain();
+            self.device.destroy_buffer(self.vertex_buffer, None);
+            self.device.free_memory(self.vertex_buffer_memory, None);
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
             self.device.destroy_command_pool(self.command_pool, None);
@@ -1103,6 +1176,7 @@ unsafe extern "system" fn debug_callback(
     vk::FALSE
 }
 
+#[derive(Debug)]
 struct Vertex {
     position: glm::Vec2,
     color: glm::Vec3,
