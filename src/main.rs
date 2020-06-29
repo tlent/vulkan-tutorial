@@ -12,14 +12,10 @@ use lazy_static::lazy_static;
 use memoffset::offset_of;
 use nalgebra_glm as glm;
 use winit::{
-    dpi::LogicalSize,
-    event::{Event, WindowEvent},
+    event::{Event, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    window::{Window, WindowBuilder},
+    window::{Fullscreen, Window, WindowBuilder},
 };
-
-const WINDOW_WIDTH: u32 = 800;
-const WINDOW_HEIGHT: u32 = 600;
 
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
@@ -38,7 +34,7 @@ lazy_static! {
     static ref VERTICES: Vec<Vertex> = vec![
         Vertex {
             position: glm::vec2(0.0, -0.5),
-            color: glm::vec3(1.0, 1.0, 1.0)
+            color: glm::vec3(1.0, 0.0, 0.0)
         },
         Vertex {
             position: glm::vec2(0.5, 0.5),
@@ -58,6 +54,10 @@ fn main() {
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent { event, .. } => match event {
             WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+            WindowEvent::KeyboardInput { input, .. } => match input.virtual_keycode {
+                Some(VirtualKeyCode::Escape) => *control_flow = ControlFlow::Exit,
+                _ => (),
+            },
             WindowEvent::Resized(size) => {
                 let size: (u32, u32) = size.into();
                 if size == (0, 0) {
@@ -83,8 +83,9 @@ fn main() {
 
 fn init_window() -> (Window, EventLoop<()>) {
     let event_loop = EventLoop::new();
+    let monitor = event_loop.primary_monitor();
     let window = WindowBuilder::new()
-        .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+        .with_fullscreen(Some(Fullscreen::Borderless(monitor)))
         .with_title("Vulkan")
         .with_resizable(false)
         .build(&event_loop)
@@ -519,13 +520,9 @@ impl HelloTriangleApp {
         window_size: (u32, u32),
         old_swapchain: Option<vk::SwapchainKHR>,
     ) -> (vk::SwapchainKHR, Vec<vk::Image>, vk::Format, vk::Extent2D) {
-        let swapchain_support = dbg!(Self::query_swapchain_support(
-            surface_loader,
-            surface,
-            device
-        ));
+        let swapchain_support = Self::query_swapchain_support(surface_loader, surface, device);
 
-        let surface_format = dbg!(Self::choose_swap_surface_format(&swapchain_support.formats));
+        let surface_format = Self::choose_swap_surface_format(&swapchain_support.formats);
         let present_mode = Self::choose_swap_present_mode(&swapchain_support.present_modes);
         let extent = Self::choose_swap_extent(swapchain_support.capabilities, window_size);
         let mut image_count = swapchain_support.capabilities.min_image_count + 1;
