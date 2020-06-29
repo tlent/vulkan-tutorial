@@ -370,6 +370,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memoffset"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4fc2c02a7e374099d4ee95a193111f72d2110197fe200272371758f6c3643d8"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "mio"
 version = "0.6.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -914,6 +923,7 @@ dependencies = [
  "ash",
  "ash-window",
  "lazy_static",
+ "memoffset",
  "nalgebra-glm",
  "winit",
 ]

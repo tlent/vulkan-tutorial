@@ -1,5 +1,6 @@
 use std::cmp;
 use std::ffi::{c_void, CStr, CString};
+use std::mem;
 use std::u32;
 
 use ash::extensions::ext::DebugUtils;
@@ -7,6 +8,8 @@ use ash::extensions::khr::{Surface, Swapchain};
 use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 use ash::{vk, Device, Entry, Instance};
 use lazy_static::lazy_static;
+use memoffset::offset_of;
+use nalgebra_glm as glm;
 use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -31,6 +34,20 @@ lazy_static! {
     static ref VALIDATION_LAYERS: Vec<&'static CStr> =
         vec![CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap()];
     static ref DEVICE_EXTENSIONS: Vec<&'static CStr> = vec![Swapchain::name()];
+    static ref VERTICES: Vec<Vertex> = vec![
+        Vertex {
+            position: glm::vec2(0.0, -0.5),
+            color: glm::vec3(1.0, 0.0, 0.0)
+        },
+        Vertex {
+            position: glm::vec2(-0.5, 0.5),
+            color: glm::vec3(0.0, 1.0, 0.0)
+        },
+        Vertex {
+            position: glm::vec2(0.5, 0.5),
+            color: glm::vec3(0.0, 0.0, 1.0)
+        },
+    ];
 }
 
 fn main() {
@@ -646,7 +663,15 @@ impl HelloTriangleApp {
         };
         let shader_stages = [vert_shader_stage_info, frag_shader_stage_info];
 
-        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
+        let vertex_binding = Vertex::binding_description();
+        let vertex_attributes = Vertex::attribute_descriptions();
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo {
+            vertex_binding_description_count: 1,
+            p_vertex_binding_descriptions: &vertex_binding,
+            vertex_attribute_description_count: vertex_attributes.len() as u32,
+            p_vertex_attribute_descriptions: vertex_attributes.as_ptr(),
+            ..Default::default()
+        };
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
             topology: vk::PrimitiveTopology::TRIANGLE_LIST,
             primitive_restart_enable: vk::FALSE,
@@ -1076,4 +1101,36 @@ unsafe extern "system" fn debug_callback(
     let message = CStr::from_ptr((*p_callback_data).p_message);
     eprintln!("validation layer: {}", message.to_string_lossy());
     vk::FALSE
+}
+
+struct Vertex {
+    position: glm::Vec2,
+    color: glm::Vec3,
+}
+
+impl Vertex {
+    fn binding_description() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: mem::size_of::<Vertex>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }
+    }
+
+    fn attribute_descriptions() -> Vec<vk::VertexInputAttributeDescription> {
+        vec![
+            vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: offset_of!(Vertex, position) as u32,
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 1,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: offset_of!(Vertex, color) as u32,
+            },
+        ]
+    }
 }
