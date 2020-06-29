@@ -476,7 +476,7 @@ impl HelloTriangleApp {
         available_formats
             .iter()
             .find(|f| {
-                f.format == vk::Format::B8G8R8_SRGB
+                f.format == vk::Format::B8G8R8A8_SRGB
                     && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
             })
             .copied()
@@ -519,9 +519,13 @@ impl HelloTriangleApp {
         window_size: (u32, u32),
         old_swapchain: Option<vk::SwapchainKHR>,
     ) -> (vk::SwapchainKHR, Vec<vk::Image>, vk::Format, vk::Extent2D) {
-        let swapchain_support = Self::query_swapchain_support(surface_loader, surface, device);
+        let swapchain_support = dbg!(Self::query_swapchain_support(
+            surface_loader,
+            surface,
+            device
+        ));
 
-        let surface_format = Self::choose_swap_surface_format(&swapchain_support.formats);
+        let surface_format = dbg!(Self::choose_swap_surface_format(&swapchain_support.formats));
         let present_mode = Self::choose_swap_present_mode(&swapchain_support.present_modes);
         let extent = Self::choose_swap_extent(swapchain_support.capabilities, window_size);
         let mut image_count = swapchain_support.capabilities.min_image_count + 1;
@@ -1148,6 +1152,7 @@ impl QueueFamilyIndices {
     }
 }
 
+#[derive(Debug)]
 struct SwapchainSupportDetails {
     capabilities: vk::SurfaceCapabilitiesKHR,
     formats: Vec<vk::SurfaceFormatKHR>,
