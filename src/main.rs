@@ -2,6 +2,7 @@ use std::cmp;
 use std::ffi::{c_void, CStr, CString};
 use std::mem;
 use std::ptr;
+use std::time::Instant;
 use std::u32;
 
 use ash::extensions::ext::DebugUtils;
@@ -99,6 +100,7 @@ fn init_window() -> (Window, EventLoop<()>) {
 }
 
 struct HelloTriangleApp {
+    start_time: Instant,
     window_size: (u32, u32),
     window_size_changed: bool,
     entry: Entry,
@@ -118,6 +120,7 @@ struct HelloTriangleApp {
     swapchain_extent: vk::Extent2D,
     swapchain_imageviews: Vec<vk::ImageView>,
     render_pass: vk::RenderPass,
+    descriptor_set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
     swapchain_framebuffers: Vec<vk::Framebuffer>,
@@ -126,6 +129,8 @@ struct HelloTriangleApp {
     vertex_buffer_memory: vk::DeviceMemory,
     index_buffer: vk::Buffer,
     index_buffer_memory: vk::DeviceMemory,
+    uniform_buffers: Vec<vk::Buffer>,
+    uniform_buffers_memory: Vec<vk::DeviceMemory>,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
@@ -165,8 +170,13 @@ impl HelloTriangleApp {
         let swapchain_imageviews =
             Self::create_imageviews(&device, &swapchain_images, swapchain_image_format);
         let render_pass = Self::create_render_pass(&device, swapchain_image_format);
-        let (graphics_pipeline, pipeline_layout) =
-            Self::create_graphics_pipeline(&device, render_pass, swapchain_extent);
+        let descriptor_set_layout = Self::create_descriptor_set_layout(&device);
+        let (graphics_pipeline, pipeline_layout) = Self::create_graphics_pipeline(
+            &device,
+            render_pass,
+            swapchain_extent,
+            descriptor_set_layout,
+        );
         let swapchain_framebuffers = Self::create_framebuffers(
             &device,
             &swapchain_imageviews,
@@ -188,6 +198,12 @@ impl HelloTriangleApp {
             graphics_queue,
             command_pool,
         );
+        let (uniform_buffers, uniform_buffers_memory) = Self::create_uniform_buffers(
+            &instance,
+            &device,
+            physical_device,
+            swapchain_images.len(),
+        );
         let command_buffers = Self::create_command_buffers(
             &device,
             command_pool,
@@ -205,6 +221,7 @@ impl HelloTriangleApp {
             images_in_flight,
         ) = Self::create_sync_objects(&device, swapchain_images.len());
         Self {
+            start_time: Instant::now(),
             window_size,
             entry,
             instance,
@@ -223,6 +240,7 @@ impl HelloTriangleApp {
             swapchain_extent,
             swapchain_imageviews,
             render_pass,
+            descriptor_set_layout,
             pipeline_layout,
             graphics_pipeline,
             swapchain_framebuffers,
@@ -231,6 +249,8 @@ impl HelloTriangleApp {
             vertex_buffer_memory,
             index_buffer,
             index_buffer_memory,
+            uniform_buffers,
+            uniform_buffers_memory,
             command_buffers,
             image_available_semaphores,
             render_finished_semaphores,
@@ -675,6 +695,7 @@ impl HelloTriangleApp {
         device: &Device,
         render_pass: vk::RenderPass,
         swapchain_extent: vk::Extent2D,
+        descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> (vk::Pipeline, vk::PipelineLayout) {
         let vert_shader_module = Self::create_shader_module(device, VERT_SHADER_BYTES);
         let frag_shader_module = Self::create_shader_module(device, FRAG_SHADER_BYTES);
@@ -754,7 +775,11 @@ impl HelloTriangleApp {
             ..Default::default()
         };
 
-        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default();
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo {
+            set_layout_count: 1,
+            p_set_layouts: &descriptor_set_layout,
+            ..Default::default()
+        };
 
         let pipeline_layout = unsafe {
             device
@@ -1144,6 +1169,52 @@ impl HelloTriangleApp {
         )
     }
 
+    fn create_descriptor_set_layout(device: &Device) -> vk::DescriptorSetLayout {
+        let layout_binding = vk::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::VERTEX,
+            ..Default::default()
+        };
+        let create_info = vk::DescriptorSetLayoutCreateInfo {
+            binding_count: 1,
+            p_bindings: &layout_binding,
+            ..Default::default()
+        };
+
+        unsafe {
+            device
+                .create_descriptor_set_layout(&create_info, None)
+                .unwrap()
+        }
+    }
+
+    fn create_uniform_buffers(
+        instance: &Instance,
+        device: &Device,
+        physical_device: vk::PhysicalDevice,
+        swapchain_image_count: usize,
+    ) -> (Vec<vk::Buffer>, Vec<vk::DeviceMemory>) {
+        let buffer_size = mem::size_of::<UniformBufferObject>();
+
+        let mut buffers = Vec::with_capacity(swapchain_image_count);
+        let mut memories = Vec::with_capacity(swapchain_image_count);
+        for _ in 0..swapchain_image_count {
+            let (buffer, memory) = Self::create_buffer(
+                instance,
+                physical_device,
+                device,
+                buffer_size as vk::DeviceSize,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            );
+            buffers.push(buffer);
+            memories.push(memory);
+        }
+        (buffers, memories)
+    }
+
     pub fn draw_frame(&mut self) {
         let current_frame = self.current_frame as usize;
         let current_in_flight_fence = self.in_flight_fences[current_frame];
@@ -1168,6 +1239,8 @@ impl HelloTriangleApp {
             }
             Err(e) => panic!(e),
         };
+
+        self.update_uniform_buffer(image_index);
 
         let current_image_fence = &mut self.images_in_flight[image_index as usize];
         if let Some(fence) = *current_image_fence {
@@ -1222,6 +1295,50 @@ impl HelloTriangleApp {
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
+    fn update_uniform_buffer(&self, current_image_index: u32) {
+        let t = (Instant::now() - self.start_time).as_secs_f32();
+
+        let model = glm::rotate(
+            &glm::Mat4::identity(),
+            t * 90.0f32.to_radians(),
+            &glm::vec3(0.0, 0.0, 1.0),
+        );
+        let view = glm::look_at(
+            &glm::vec3(2.0, 2.0, 2.0),
+            &glm::vec3(0.0, 0.0, 0.0),
+            &glm::vec3(0.0, 1.0, 0.0),
+        );
+        let (width, height) = self.window_size;
+        let mut projection = glm::perspective(
+            width as f32 / height as f32,
+            45.0f32.to_radians(),
+            0.1,
+            10.0,
+        );
+        projection[(1, 1)] *= -1.0;
+
+        let ubo = UniformBufferObject {
+            model,
+            view,
+            projection,
+        };
+        let size = mem::size_of::<UniformBufferObject>();
+        let memory = self.uniform_buffers_memory[current_image_index as usize];
+        unsafe {
+            let p = self
+                .device
+                .map_memory(
+                    memory,
+                    0,
+                    size as vk::DeviceSize,
+                    vk::MemoryMapFlags::default(),
+                )
+                .unwrap();
+            ptr::copy_nonoverlapping(&ubo, p as *mut UniformBufferObject, 1);
+            self.device.unmap_memory(memory);
+        }
+    }
+
     pub fn recreate_swapchain(&mut self) {
         unsafe { self.device.device_wait_idle().unwrap() };
 
@@ -1240,13 +1357,23 @@ impl HelloTriangleApp {
         let swapchain_imageviews =
             Self::create_imageviews(&self.device, &swapchain_images, swapchain_image_format);
         let render_pass = Self::create_render_pass(&self.device, swapchain_image_format);
-        let (graphics_pipeline, pipeline_layout) =
-            Self::create_graphics_pipeline(&self.device, render_pass, swapchain_extent);
+        let (graphics_pipeline, pipeline_layout) = Self::create_graphics_pipeline(
+            &self.device,
+            render_pass,
+            swapchain_extent,
+            self.descriptor_set_layout,
+        );
         let swapchain_framebuffers = Self::create_framebuffers(
             &self.device,
             &swapchain_imageviews,
             render_pass,
             swapchain_extent,
+        );
+        let (uniform_buffers, uniform_buffer_memory) = Self::create_uniform_buffers(
+            &self.instance,
+            &self.device,
+            self.physical_device,
+            swapchain_images.len(),
         );
         let command_buffers = Self::create_command_buffers(
             &self.device,
@@ -1267,11 +1394,19 @@ impl HelloTriangleApp {
         self.graphics_pipeline = graphics_pipeline;
         self.pipeline_layout = pipeline_layout;
         self.swapchain_framebuffers = swapchain_framebuffers;
+        self.uniform_buffers = uniform_buffers;
+        self.uniform_buffers_memory = uniform_buffer_memory;
         self.command_buffers = command_buffers;
     }
 
     fn cleanup_swapchain(&self) {
         unsafe {
+            for &b in &self.uniform_buffers {
+                self.device.destroy_buffer(b, None);
+            }
+            for &mem in &self.uniform_buffers_memory {
+                self.device.free_memory(mem, None);
+            }
             self.device
                 .free_command_buffers(self.command_pool, &self.command_buffers);
             for &f in &self.swapchain_framebuffers {
@@ -1309,6 +1444,8 @@ impl Drop for HelloTriangleApp {
                 self.device.destroy_fence(fence, None);
             }
             self.cleanup_swapchain();
+            self.device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_memory, None);
             self.device.destroy_buffer(self.index_buffer, None);
@@ -1399,4 +1536,11 @@ impl Vertex {
             },
         ]
     }
+}
+
+#[derive(Debug)]
+struct UniformBufferObject {
+    model: glm::Mat4,
+    view: glm::Mat4,
+    projection: glm::Mat4,
 }
