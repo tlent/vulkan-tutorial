@@ -33,18 +33,23 @@ lazy_static! {
     static ref DEVICE_EXTENSIONS: Vec<&'static CStr> = vec![Swapchain::name()];
     static ref VERTICES: Vec<Vertex> = vec![
         Vertex {
-            position: glm::vec2(0.0, -0.5),
+            position: glm::vec2(-0.5, -0.5),
             color: glm::vec3(1.0, 0.0, 0.0)
         },
         Vertex {
-            position: glm::vec2(0.5, 0.5),
+            position: glm::vec2(0.5, -0.5),
             color: glm::vec3(0.0, 1.0, 0.0)
         },
         Vertex {
-            position: glm::vec2(-0.5, 0.5),
+            position: glm::vec2(0.5, 0.5),
             color: glm::vec3(0.0, 0.0, 1.0)
         },
+        Vertex {
+            position: glm::vec2(-0.5, 0.5),
+            color: glm::vec3(1.0, 1.0, 1.0)
+        },
     ];
+    static ref INDICES: Vec<u16> = vec![0, 1, 2, 2, 3, 0];
 }
 
 fn main() {
@@ -119,6 +124,8 @@ struct HelloTriangleApp {
     command_pool: vk::CommandPool,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
+    index_buffer: vk::Buffer,
+    index_buffer_memory: vk::DeviceMemory,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
@@ -174,12 +181,20 @@ impl HelloTriangleApp {
             graphics_queue,
             command_pool,
         );
+        let (index_buffer, index_buffer_memory) = Self::create_index_buffer(
+            &instance,
+            &device,
+            physical_device,
+            graphics_queue,
+            command_pool,
+        );
         let command_buffers = Self::create_command_buffers(
             &device,
             command_pool,
             render_pass,
             &swapchain_framebuffers,
             vertex_buffer,
+            index_buffer,
             swapchain_extent,
             graphics_pipeline,
         );
@@ -214,6 +229,8 @@ impl HelloTriangleApp {
             command_pool,
             vertex_buffer,
             vertex_buffer_memory,
+            index_buffer,
+            index_buffer_memory,
             command_buffers,
             image_available_semaphores,
             render_finished_semaphores,
@@ -960,6 +977,62 @@ impl HelloTriangleApp {
         (vertex_buffer, vertex_buffer_memory)
     }
 
+    fn create_index_buffer(
+        instance: &Instance,
+        device: &Device,
+        physical_device: vk::PhysicalDevice,
+        transfer_queue: vk::Queue,
+        command_pool: vk::CommandPool,
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        let buffer_size = (INDICES.len() * mem::size_of::<u16>()) as vk::DeviceSize;
+        let (staging_buffer, staging_buffer_memory) = Self::create_buffer(
+            instance,
+            physical_device,
+            device,
+            buffer_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+
+        unsafe {
+            let data = device
+                .map_memory(
+                    staging_buffer_memory,
+                    0,
+                    buffer_size,
+                    vk::MemoryMapFlags::default(),
+                )
+                .unwrap();
+            ptr::copy_nonoverlapping(INDICES.as_ptr(), data as *mut u16, INDICES.len());
+            device.unmap_memory(staging_buffer_memory);
+        }
+
+        let (index_buffer, index_buffer_memory) = Self::create_buffer(
+            instance,
+            physical_device,
+            device,
+            buffer_size,
+            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        );
+
+        Self::copy_buffer(
+            device,
+            transfer_queue,
+            command_pool,
+            staging_buffer,
+            index_buffer,
+            buffer_size,
+        );
+
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_buffer_memory, None);
+        }
+
+        (index_buffer, index_buffer_memory)
+    }
+
     fn find_memory_type(
         instance: &Instance,
         physical_device: vk::PhysicalDevice,
@@ -982,6 +1055,7 @@ impl HelloTriangleApp {
         render_pass: vk::RenderPass,
         framebuffers: &[vk::Framebuffer],
         vertex_buffer: vk::Buffer,
+        index_buffer: vk::Buffer,
         extent: vk::Extent2D,
         pipeline: vk::Pipeline,
     ) -> Vec<vk::CommandBuffer> {
@@ -1022,7 +1096,13 @@ impl HelloTriangleApp {
                 );
                 device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
                 device.cmd_bind_vertex_buffers(command_buffer, 0, &[vertex_buffer], &[0]);
-                device.cmd_draw(command_buffer, VERTICES.len() as u32, 1, 0, 0);
+                device.cmd_bind_index_buffer(
+                    command_buffer,
+                    index_buffer,
+                    0,
+                    vk::IndexType::UINT16,
+                );
+                device.cmd_draw_indexed(command_buffer, INDICES.len() as u32, 1, 0, 0, 0);
                 device.cmd_end_render_pass(command_buffer);
                 device.end_command_buffer(command_buffer).unwrap();
             }
@@ -1174,6 +1254,7 @@ impl HelloTriangleApp {
             render_pass,
             &swapchain_framebuffers,
             self.vertex_buffer,
+            self.index_buffer,
             swapchain_extent,
             graphics_pipeline,
         );
@@ -1230,6 +1311,8 @@ impl Drop for HelloTriangleApp {
             self.cleanup_swapchain();
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_memory, None);
+            self.device.destroy_buffer(self.index_buffer, None);
+            self.device.free_memory(self.index_buffer_memory, None);
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
             self.device.destroy_command_pool(self.command_pool, None);
