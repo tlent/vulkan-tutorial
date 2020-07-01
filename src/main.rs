@@ -131,6 +131,8 @@ struct HelloTriangleApp {
     index_buffer_memory: vk::DeviceMemory,
     uniform_buffers: Vec<vk::Buffer>,
     uniform_buffers_memory: Vec<vk::DeviceMemory>,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
@@ -204,6 +206,14 @@ impl HelloTriangleApp {
             physical_device,
             swapchain_images.len(),
         );
+        let descriptor_pool = Self::create_descriptor_pool(&device, swapchain_images.len());
+        let descriptor_sets = Self::create_descriptor_sets(
+            &device,
+            descriptor_pool,
+            descriptor_set_layout,
+            &uniform_buffers,
+            swapchain_images.len(),
+        );
         let command_buffers = Self::create_command_buffers(
             &device,
             command_pool,
@@ -213,6 +223,8 @@ impl HelloTriangleApp {
             index_buffer,
             swapchain_extent,
             graphics_pipeline,
+            pipeline_layout,
+            &descriptor_sets,
         );
         let (
             image_available_semaphores,
@@ -251,6 +263,8 @@ impl HelloTriangleApp {
             index_buffer_memory,
             uniform_buffers,
             uniform_buffers_memory,
+            descriptor_pool,
+            descriptor_sets,
             command_buffers,
             image_available_semaphores,
             render_finished_semaphores,
@@ -753,7 +767,7 @@ impl HelloTriangleApp {
             rasterizer_discard_enable: vk::FALSE,
             polygon_mode: vk::PolygonMode::FILL,
             cull_mode: vk::CullModeFlags::BACK,
-            front_face: vk::FrontFace::CLOCKWISE,
+            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
             depth_bias_enable: vk::FALSE,
             line_width: 1.0,
             ..Default::default()
@@ -1083,6 +1097,8 @@ impl HelloTriangleApp {
         index_buffer: vk::Buffer,
         extent: vk::Extent2D,
         pipeline: vk::Pipeline,
+        pipeline_layout: vk::PipelineLayout,
+        descriptor_sets: &[vk::DescriptorSet],
     ) -> Vec<vk::CommandBuffer> {
         let create_info = vk::CommandBufferAllocateInfo {
             command_pool,
@@ -1091,7 +1107,9 @@ impl HelloTriangleApp {
             ..Default::default()
         };
         let command_buffers = unsafe { device.allocate_command_buffers(&create_info).unwrap() };
-        for (&command_buffer, &framebuffer) in command_buffers.iter().zip(framebuffers) {
+        for (i, &command_buffer) in command_buffers.iter().enumerate() {
+            let framebuffer = framebuffers[i];
+            let descriptor_set = descriptor_sets[i];
             let begin_info = vk::CommandBufferBeginInfo::default();
             let render_area = vk::Rect2D {
                 extent,
@@ -1121,6 +1139,14 @@ impl HelloTriangleApp {
                 );
                 device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
                 device.cmd_bind_vertex_buffers(command_buffer, 0, &[vertex_buffer], &[0]);
+                device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline_layout,
+                    0,
+                    &[descriptor_set],
+                    &[],
+                );
                 device.cmd_bind_index_buffer(
                     command_buffer,
                     index_buffer,
@@ -1306,7 +1332,7 @@ impl HelloTriangleApp {
         let view = glm::look_at(
             &glm::vec3(2.0, 2.0, 2.0),
             &glm::vec3(0.0, 0.0, 0.0),
-            &glm::vec3(0.0, 1.0, 0.0),
+            &glm::vec3(0.0, 0.0, 1.0),
         );
         let (width, height) = self.window_size;
         let mut projection = glm::perspective(
@@ -1318,9 +1344,9 @@ impl HelloTriangleApp {
         projection[(1, 1)] *= -1.0;
 
         let ubo = UniformBufferObject {
-            model,
-            view,
-            projection,
+            model: AlignedMat4(model),
+            view: AlignedMat4(view),
+            projection: AlignedMat4(projection),
         };
         let size = mem::size_of::<UniformBufferObject>();
         let memory = self.uniform_buffers_memory[current_image_index as usize];
@@ -1337,6 +1363,63 @@ impl HelloTriangleApp {
             ptr::copy_nonoverlapping(&ubo, p as *mut UniformBufferObject, 1);
             self.device.unmap_memory(memory);
         }
+    }
+
+    fn create_descriptor_pool(device: &Device, size: usize) -> vk::DescriptorPool {
+        let size = size as u32;
+        let pool_size = vk::DescriptorPoolSize {
+            descriptor_count: size,
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            ..Default::default()
+        };
+        let pool_info = vk::DescriptorPoolCreateInfo {
+            pool_size_count: 1,
+            p_pool_sizes: &pool_size,
+            max_sets: size,
+            ..Default::default()
+        };
+        unsafe { device.create_descriptor_pool(&pool_info, None).unwrap() }
+    }
+
+    fn create_descriptor_sets(
+        device: &Device,
+        pool: vk::DescriptorPool,
+        layout: vk::DescriptorSetLayout,
+        uniform_buffers: &[vk::Buffer],
+        size: usize,
+    ) -> Vec<vk::DescriptorSet> {
+        let layouts = vec![layout; size];
+        let size = size as u32;
+        let alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool: pool,
+            descriptor_set_count: size,
+            p_set_layouts: layouts.as_ptr(),
+            ..Default::default()
+        };
+
+        let sets = unsafe { device.allocate_descriptor_sets(&alloc_info).unwrap() };
+
+        for (&set, &buffer) in sets.iter().zip(uniform_buffers.iter()) {
+            let buffer_info = vk::DescriptorBufferInfo {
+                buffer,
+                offset: 0,
+                range: mem::size_of::<UniformBufferObject>() as vk::DeviceSize,
+            };
+
+            let descriptor_write = vk::WriteDescriptorSet {
+                dst_set: set,
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1,
+                p_buffer_info: &buffer_info,
+                ..Default::default()
+            };
+
+            unsafe { device.update_descriptor_sets(&[descriptor_write], &[]) };
+        }
+
+        sets
     }
 
     pub fn recreate_swapchain(&mut self) {
@@ -1375,6 +1458,14 @@ impl HelloTriangleApp {
             self.physical_device,
             swapchain_images.len(),
         );
+        let descriptor_pool = Self::create_descriptor_pool(&self.device, swapchain_images.len());
+        let descriptor_sets = Self::create_descriptor_sets(
+            &self.device,
+            descriptor_pool,
+            self.descriptor_set_layout,
+            &uniform_buffers,
+            swapchain_images.len(),
+        );
         let command_buffers = Self::create_command_buffers(
             &self.device,
             self.command_pool,
@@ -1384,6 +1475,8 @@ impl HelloTriangleApp {
             self.index_buffer,
             swapchain_extent,
             graphics_pipeline,
+            pipeline_layout,
+            &descriptor_sets,
         );
         self.swapchain = swapchain;
         self.swapchain_images = swapchain_images;
@@ -1396,6 +1489,8 @@ impl HelloTriangleApp {
         self.swapchain_framebuffers = swapchain_framebuffers;
         self.uniform_buffers = uniform_buffers;
         self.uniform_buffers_memory = uniform_buffer_memory;
+        self.descriptor_pool = descriptor_pool;
+        self.descriptor_sets = descriptor_sets;
         self.command_buffers = command_buffers;
     }
 
@@ -1407,6 +1502,8 @@ impl HelloTriangleApp {
             for &mem in &self.uniform_buffers_memory {
                 self.device.free_memory(mem, None);
             }
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device
                 .free_command_buffers(self.command_pool, &self.command_buffers);
             for &f in &self.swapchain_framebuffers {
@@ -1539,8 +1636,13 @@ impl Vertex {
 }
 
 #[derive(Debug)]
+#[repr(C)]
 struct UniformBufferObject {
-    model: glm::Mat4,
-    view: glm::Mat4,
-    projection: glm::Mat4,
+    model: AlignedMat4,
+    view: AlignedMat4,
+    projection: AlignedMat4,
 }
+
+#[derive(Debug)]
+#[repr(C, align(16))]
+struct AlignedMat4(glm::Mat4);
